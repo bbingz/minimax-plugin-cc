@@ -778,7 +778,7 @@ const CONFIG_NOT_CONFIGURED_PATTERN = /Please configure a valid API Key/;
 const CONFIG_NOT_FOUND_PATTERN = /Configuration file not found/;
 const SOCKS_IMPORT_ERROR_PATTERN = /ImportError: Using SOCKS proxy/;
 
-function stripAnsiSgr(s) {
+export function stripAnsiSgr(s) {
   return String(s).replace(/\x1b\[[0-9;]*m/g, "");
 }
 

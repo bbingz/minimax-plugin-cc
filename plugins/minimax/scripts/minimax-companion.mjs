@@ -9,6 +9,7 @@ import {
   redactSecrets,
   callMiniAgent,
   classifyMiniAgentResult,
+  stripAnsiSgr,
 } from "./lib/minimax.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
 
@@ -139,10 +140,6 @@ const STATUS_EXIT_CODE = {
   "success-claimed-but-no-log": 5,
 };
 
-function stripAnsi(s) {
-  return String(s).replace(/\x1b\[[0-9;]*m/g, "");
-}
-
 async function runAsk(rawArgs) {
   const { options, positionals } = parseArgs(rawArgs, {
     booleanOptions: ["json"],
@@ -158,7 +155,11 @@ async function runAsk(rawArgs) {
 
   const timeout = options.timeout ? Number(options.timeout) : 120_000;
   if (!Number.isFinite(timeout) || timeout <= 0) {
-    process.stderr.write(`Error: invalid --timeout '${options.timeout}'\n`);
+    if (options.json) {
+      process.stdout.write(JSON.stringify({ status: "bad-input", reason: `invalid --timeout '${options.timeout}'` }) + "\n");
+    } else {
+      process.stderr.write(`Error: invalid --timeout '${options.timeout}'\n`);
+    }
     process.exit(1);
   }
 
@@ -171,7 +172,7 @@ async function runAsk(rawArgs) {
 
   const onProgressLine = (line) => {
     if (options.json) return;
-    process.stdout.write(stripAnsi(line) + "\n");
+    process.stdout.write(stripAnsiSgr(line) + "\n");
   };
 
   const result = await callMiniAgent({ prompt, cwd, timeout, onProgressLine });
