@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import process from "node:process";
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import {
@@ -10,6 +13,7 @@ import {
   callMiniAgent,
   classifyMiniAgentResult,
   stripAnsiSgr,
+  callMiniAgentReview,
 } from "./lib/minimax.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
 
@@ -31,6 +35,10 @@ Subcommands:
                       3 = auth/config/socksio/not-installed
                       4 = llm-call-failed
                       5 = unknown-crashed / success-claimed-but-no-log
+
+  review [--json] [--timeout <ms>] [--cwd <path>] [--base <ref>] [--scope <mode>] [focus]
+                    Review git diff with mini-agent. Auto scope prefers working
+                    tree, then staged, then branch when --base is provided.
 `;
 
 function maskApiKey(k) {
@@ -218,6 +226,192 @@ async function runAsk(rawArgs) {
   process.exit(exitCode);
 }
 
+// Task 3.5: runReview subcommand
+
+function collectDiff({ base, scope = "auto", cwd }) {
+  // Refuse to review while merge conflicts are unresolved
+  const unmerged = spawnSync("git", ["ls-files", "--unmerged"], { cwd, encoding: "utf8" });
+  if (unmerged.status !== 0) {
+    return { ok: false, reason: "git-diff-failed", detail: `git ls-files --unmerged failed: ${unmerged.stderr.trim()}` };
+  }
+  if (unmerged.stdout.trim().length > 0) {
+    return {
+      ok: false,
+      reason: "merge-conflict-present",
+      detail: "unresolved merge conflicts detected; resolve them before running review",
+    };
+  }
+
+  let effectiveScope = scope;
+  if (scope === "auto") {
+    const wtree = spawnSync("git", ["diff", "--name-only"], { cwd, encoding: "utf8" });
+    if (wtree.status !== 0) return { ok: false, reason: "git-diff-failed", detail: wtree.stderr.trim() };
+    if (wtree.stdout.trim().length > 0) effectiveScope = "working-tree";
+    else {
+      const staged = spawnSync("git", ["diff", "--cached", "--name-only"], { cwd, encoding: "utf8" });
+      if (staged.status !== 0) return { ok: false, reason: "git-diff-failed", detail: staged.stderr.trim() };
+      if (staged.stdout.trim().length > 0) effectiveScope = "staged";
+      else if (base) effectiveScope = "branch";
+      else return { ok: false, reason: "no-diff", detail: "no working-tree or staged changes; specify --base for branch compare" };
+    }
+  }
+
+  let args;
+  if (effectiveScope === "working-tree") args = ["diff"];
+  else if (effectiveScope === "staged") args = ["diff", "--cached"];
+  else if (effectiveScope === "branch") {
+    if (!base) return { ok: false, reason: "no-base", detail: "--scope branch requires --base" };
+    args = ["diff", `${base}...HEAD`];
+  } else {
+    return { ok: false, reason: "bad-scope", detail: `unknown --scope '${scope}'` };
+  }
+
+  const diff = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+  if (diff.status !== 0) return { ok: false, reason: "git-diff-failed", detail: diff.stderr.trim() };
+  return { ok: true, scope: effectiveScope, diff: diff.stdout };
+}
+
+const REVIEW_STATUS_EXIT = {
+  "no-diff": 2,
+  "no-base": 2,
+  "bad-scope": 2,
+  "merge-conflict-present": 2,
+  "git-diff-failed": 6,
+  "call-failed": 4,
+  "parse-validate-failed": 5,
+};
+
+async function runReview(rawArgs) {
+  const { options, positionals } = parseArgs(rawArgs, {
+    booleanOptions: ["json"],
+    valueOptions: ["timeout", "cwd", "base", "scope"],
+  });
+
+  const cwd = options.cwd || process.cwd();
+  const base = options.base || null;
+  const scope = options.scope || "auto";
+  const focus = positionals.join(" ").trim();
+  const timeout = options.timeout ? Number(options.timeout) : 120_000;
+
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    if (options.json) {
+      process.stdout.write(JSON.stringify({ status: "bad-input", reason: `invalid --timeout '${options.timeout}'` }) + "\n");
+    } else {
+      process.stderr.write(`Error: invalid --timeout '${options.timeout}'\n`);
+    }
+    process.exit(1);
+  }
+
+  const diffResult = collectDiff({ base, scope, cwd });
+  if (!diffResult.ok) {
+    const exitCode = REVIEW_STATUS_EXIT[diffResult.reason] ?? 6;
+    const payload = { status: diffResult.reason, detail: diffResult.detail };
+    if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    else process.stderr.write(`Error: ${diffResult.reason} -- ${diffResult.detail}\n`);
+    process.exit(exitCode);
+  }
+  if (!diffResult.diff.trim()) {
+    const payload = { status: "no-diff", detail: `scope=${diffResult.scope} yielded empty diff` };
+    if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    else process.stdout.write(`No changes under scope=${diffResult.scope}; nothing to review.\n`);
+    process.exit(2);
+  }
+
+  if (!options.json) {
+    process.stdout.write(`Reviewing (scope=${diffResult.scope}${base ? ", base=" + base : ""}, focus="${focus || "(none)"}")...\n`);
+    process.stdout.write("Starting MiniMax (cold start ~3s)...\n");
+  }
+
+  const schemaPath = path.resolve(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas", "review-output.schema.json")
+  );
+
+  const onProgressLine = options.json ? undefined : (line) => {
+    process.stderr.write(stripAnsiSgr(line) + "\n");
+  };
+
+  const r = await callMiniAgentReview({
+    context: diffResult.diff,
+    focus,
+    schemaPath,
+    cwd,
+    timeout,
+    onProgressLine,
+  });
+
+  if (r.ok) {
+    if (options.json) {
+      process.stdout.write(JSON.stringify({
+        status: "ok",
+        verdict: r.verdict,
+        summary: r.summary,
+        findings: r.findings,
+        next_steps: r.next_steps,
+        retry_used: r.retry_used,
+        retriedOnce: r.retriedOnce,
+        retry_notice: r.retry_notice,
+        truncated: r.truncated,
+        logPath: r.logPath,
+      }, null, 2) + "\n");
+    } else {
+      const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+      const findings = [...r.findings].sort((a, b) => sevOrder[a.severity] - sevOrder[b.severity]);
+      process.stdout.write(`\nVerdict: ${r.verdict}\n`);
+      process.stdout.write(`Summary: ${r.summary}\n`);
+      if (findings.length === 0) {
+        process.stdout.write("Findings: (none)\n");
+      } else {
+        process.stdout.write(`Findings (${findings.length}):\n`);
+        for (const f of findings) {
+          process.stdout.write(`  - [${f.severity}] ${f.title}\n`);
+          process.stdout.write(`    ${f.file}:${f.line_start}${f.line_end !== f.line_start ? "-" + f.line_end : ""}  (confidence ${f.confidence})\n`);
+          process.stdout.write(`    ${f.body}\n`);
+          process.stdout.write(`    fix: ${f.recommendation}\n`);
+        }
+      }
+      if (r.next_steps.length) {
+        process.stdout.write("Next steps:\n");
+        for (const s of r.next_steps) process.stdout.write(`  - ${s}\n`);
+      }
+      const cfg = readMiniAgentConfig();
+      const footerParts = [];
+      if (cfg.model) footerParts.push(`model: ${cfg.model}`);
+      if (r.logPath) footerParts.push(`log: ${r.logPath}`);
+      if (r.truncated) footerParts.push("truncated");
+      if (r.retry_used) footerParts.push("retry-used");
+      if (footerParts.length) process.stdout.write(`(${footerParts.join(" · ")})\n`);
+      if (r.retry_used) process.stdout.write(`(note: review retry used -- ${r.retry_notice})\n`);
+    }
+    process.exit(0);
+  } else {
+    const reason = r.diagnostic ? "call-failed" : "parse-validate-failed";
+    const exitCode = REVIEW_STATUS_EXIT[reason] ?? 5;
+    if (options.json) {
+      process.stdout.write(JSON.stringify({
+        status: reason,
+        error: r.error,
+        firstRawText: r.firstRawText,
+        rawText: r.rawText,
+        parseError: r.parseError,
+        retry_used: r.retry_used,
+        retriedOnce: r.retriedOnce,
+        diagnostic: r.diagnostic,
+      }, null, 2) + "\n");
+    } else {
+      process.stderr.write(`Error: ${reason} -- ${r.error}\n`);
+      if (r.diagnostic && r.diagnostic.stderrHeadTail) {
+        process.stderr.write(`\n--- diagnostic (stderr head+tail, ANSI stripped) ---\n${r.diagnostic.stderrHeadTail}\n`);
+      }
+      if (r.diagnostic && r.diagnostic.lastPartialResponseRaw) {
+        process.stderr.write(`\n--- last partial RESPONSE block (log) ---\n${String(r.diagnostic.lastPartialResponseRaw).slice(0, 1500)}\n`);
+      }
+      if (r.firstRawText) process.stderr.write(`\n(first raw response, redacted, truncated)\n${r.firstRawText.slice(0, 1500)}\n`);
+      if (r.rawText) process.stderr.write(`\n(retry raw response, redacted, truncated)\n${r.rawText.slice(0, 1500)}\n`);
+    }
+    process.exit(exitCode);
+  }
+}
+
 async function main() {
   const argv = process.argv.slice(2);
 
@@ -233,6 +427,8 @@ async function main() {
       return await runWriteKey(rest);
     case "ask":
       return await runAsk(rest);
+    case "review":
+      return await runReview(rest);
     case undefined:
     case "--help":
     case "-h":
