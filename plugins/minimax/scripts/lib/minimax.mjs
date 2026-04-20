@@ -360,18 +360,13 @@ export function spawnWithHardTimeout(bin, args, options = {}) {
 
     proc.on("error", (err) => {
       if (settled) return;
-      settled = true;
-      clearTimeout(termTimer);
-      clearTimeout(killTimer);
       proc.stdout?.removeAllListeners();
       proc.stderr?.removeAllListeners();
       proc.removeAllListeners("close");
-      resolve({
-        exitCode: null, signal: null,
-        stdout: stdoutBuf, stderr: stderrBuf,
-        stdoutTruncated, stderrTruncated,
-        timedOut: false, spawnError: err,
-      });
+      // Route through finalize() so lineCarry gets flushed on spawn error
+      // (ENOENT/EPERM etc.). proc.exitCode/signalCode are null here, matching
+      // the prior inline resolve() shape.
+      finalize({ spawnError: err });
     });
 
     const stdoutDecoder = new StringDecoder("utf8");
