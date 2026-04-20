@@ -76,3 +76,206 @@ export function _invalidateConfigCache() { _configCache = undefined; }
 export function getMiniAgentAvailability(cwd) {
   return binaryAvailable(MINI_AGENT_BIN, ["--version"], { cwd });
 }
+
+// ── YAML write gate (spec §3.4.2 state machine, plan v5) ──────
+//
+// 只接受 Form D（"..."）和 Form S（'...'）两种单行形态；plain scalar 一律拒。
+// Quote-aware: 引号内的 `#` / `{` / `[` 是字面文本，不是注释/流式标记。
+
+function findClosingDoubleQuote(s, start) {
+  // YAML 1.2.2 §5.7: 双引号内 `\` 转义下一字符；遇未转义 `"` 即闭合
+  let i = start + 1;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "\\") { i += 2; continue; }
+    if (c === '"') return i;
+    i++;
+  }
+  return -1;
+}
+
+function findClosingSingleQuote(s, start) {
+  // YAML 1.2.2 §7.3.2: `''` 是转义；其他 `'` 即闭合
+  let i = start + 1;
+  while (i < s.length) {
+    if (s[i] === "'") {
+      if (s[i + 1] === "'") { i += 2; continue; }
+      return i;
+    }
+    i++;
+  }
+  return -1;
+}
+
+function findInlineCommentAfter(s, startIdx) {
+  // 只有 ` #` 或 `\t#` 才算 inline comment（YAML 1.2.2 §6.6：`#` 前必须有空白）
+  for (let i = startIdx; i < s.length; i++) {
+    if ((s[i] === " " || s[i] === "\t") && s[i + 1] === "#") return i;
+  }
+  return -1;
+}
+
+/**
+ * spec §3.4.2 state machine — quote-aware trailing comment detection.
+ * @returns {{ ok: boolean, reason?: string, lineNumber?: number, form?: "D"|"S" }}
+ */
+export function validateYamlForApiKeyWrite(text) {
+  if (!text) return { ok: false, reason: "empty-file" };
+  if (text.charCodeAt(0) === 0xFEFF) return { ok: false, reason: "BOM at file start" };
+
+  const lines = text.split(/\r?\n/);
+  const matches = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (raw.trim() === "") continue;
+    if (raw.trimStart().startsWith("#")) continue;
+    if (raw[0] === " " || raw[0] === "\t") continue;
+    const m = raw.match(/^api_key\s*:\s*(.*)$/);
+    if (m) matches.push({ index: i, valueRaw: m[1] });
+  }
+
+  if (matches.length === 0) return { ok: false, reason: "no-api-key" };
+  if (matches.length > 1) return { ok: false, reason: "duplicate-api-key", lineNumber: matches[1].index + 1 };
+
+  const match = matches[0];
+  // 不预先 stripInlineComment——引号内 `#` 是字面
+  let v = match.valueRaw.replace(/\s+$/, "");
+
+  if (v === "") return { ok: false, reason: "empty-value-looks-like-block-scalar", lineNumber: match.index + 1 };
+
+  if (/^[|>]/.test(v)) {
+    return { ok: false, reason: "block-scalar-indicator", lineNumber: match.index + 1 };
+  }
+  if (v.startsWith("{") || v.startsWith("[")) {
+    return { ok: false, reason: "flow-style", lineNumber: match.index + 1 };
+  }
+  if (v.startsWith("&") || v.startsWith("*") || v.startsWith("!")) {
+    return { ok: false, reason: "anchor-alias-or-tag", lineNumber: match.index + 1 };
+  }
+
+  // Form D
+  if (v.startsWith('"')) {
+    const close = findClosingDoubleQuote(v, 0);
+    if (close < 0) return { ok: false, reason: "form-D-unclosed", lineNumber: match.index + 1 };
+    const afterClose = v.slice(close + 1);
+    const commentIdx = findInlineCommentAfter(afterClose, 0);
+    const trailing = (commentIdx >= 0 ? afterClose.slice(0, commentIdx) : afterClose).trim();
+    if (trailing !== "") return { ok: false, reason: "form-D-trailing-content", lineNumber: match.index + 1 };
+    const next = lines[match.index + 1];
+    if (next && (next[0] === " " || next[0] === "\t") && next.trim() !== "" && !next.trimStart().startsWith("#")) {
+      return { ok: false, reason: "suspicious-continuation-after-api-key", lineNumber: match.index + 2 };
+    }
+    return { ok: true, lineNumber: match.index + 1, form: "D" };
+  }
+
+  // Form S
+  if (v.startsWith("'")) {
+    const close = findClosingSingleQuote(v, 0);
+    if (close < 0) return { ok: false, reason: "form-S-unclosed", lineNumber: match.index + 1 };
+    const afterClose = v.slice(close + 1);
+    const commentIdx = findInlineCommentAfter(afterClose, 0);
+    const trailing = (commentIdx >= 0 ? afterClose.slice(0, commentIdx) : afterClose).trim();
+    if (trailing !== "") return { ok: false, reason: "form-S-trailing-content", lineNumber: match.index + 1 };
+    const next = lines[match.index + 1];
+    if (next && (next[0] === " " || next[0] === "\t") && next.trim() !== "" && !next.trimStart().startsWith("#")) {
+      return { ok: false, reason: "suspicious-continuation-after-api-key", lineNumber: match.index + 2 };
+    }
+    return { ok: true, lineNumber: match.index + 1, form: "S" };
+  }
+
+  // Plain scalar —— 强制拒绝
+  return { ok: false, reason: "plain-scalar-requires-quoting", lineNumber: match.index + 1 };
+}
+
+// ── Key content validation (spec §3.4.3) ──────────────────────
+
+const CONTROL_CHAR_REGEX = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+const MAX_KEY_LEN = 4096;
+
+export function validateKeyContent(newKey) {
+  if (typeof newKey !== "string" || newKey.length === 0) return { ok: false, reason: "empty-key" };
+  if (newKey.length > MAX_KEY_LEN) return { ok: false, reason: "key-too-long" };
+  if (CONTROL_CHAR_REGEX.test(newKey)) return { ok: false, reason: "control-char-in-key" };
+  if (/\n|\r|\t/.test(newKey)) return { ok: false, reason: "whitespace-newline-in-key" };
+  // 代理对检测
+  for (let i = 0; i < newKey.length; i++) {
+    const c = newKey.charCodeAt(i);
+    if (c >= 0xD800 && c <= 0xDBFF) {
+      const n = newKey.charCodeAt(i + 1);
+      if (!(n >= 0xDC00 && n <= 0xDFFF)) return { ok: false, reason: "unpaired-surrogate" };
+      i++;
+    } else if (c >= 0xDC00 && c <= 0xDFFF) {
+      return { ok: false, reason: "unpaired-surrogate" };
+    }
+  }
+  return { ok: true };
+}
+
+export function escapeForYamlDoubleQuoted(s) {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\t/g, "\\t")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n");
+}
+
+// ── API key redaction (spec §3.4) ─────────────────────────────
+
+export function redactSecrets(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(/sk-[A-Za-z0-9_\-\.]{20,}/g, "sk-***REDACTED***")
+    .replace(/eyJ[A-Za-z0-9_\-\.]{20,}/g, "eyJ***REDACTED***");
+}
+
+// ── Atomic YAML api_key write (spec §3.4 / §4.2, plan v5) ─────
+
+function fsyncAndRename(tmpPath, targetPath) {
+  const fd = fs.openSync(tmpPath, "r+");
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.renameSync(tmpPath, targetPath);
+  try {
+    const dirFd = fs.openSync(path.dirname(targetPath), "r");
+    try { fs.fsyncSync(dirFd); } catch { /* Windows 允许 fail */ }
+    finally { fs.closeSync(dirFd); }
+  } catch { /* 目录打开失败忽略 */ }
+}
+
+/**
+ * Write api_key into MINI_AGENT_CONFIG_PATH atomically, under withLockAsync.
+ * @returns {Promise<{ok:boolean, reason?:string, lineNumber?:number, form?:"D"}>}
+ */
+export async function writeMiniAgentApiKey(newKey) {
+  const keyCheck = validateKeyContent(newKey);
+  if (!keyCheck.ok) return keyCheck;
+
+  let text;
+  try { text = fs.readFileSync(MINI_AGENT_CONFIG_PATH, "utf8"); }
+  catch (err) { return { ok: false, reason: `read-failed: ${err.code || err.message}` }; }
+
+  const gate = validateYamlForApiKeyWrite(text);
+  if (!gate.ok) return gate;
+
+  // 规范化输出为 Form D（§3.4.3）
+  const escapedKey = escapeForYamlDoubleQuoted(newKey);
+  const next = text.replace(/^api_key\s*:\s*.*$/m, `api_key: "${escapedKey}"`);
+
+  const tmpPath = `${MINI_AGENT_CONFIG_PATH}.tmp.${process.pid}.${Date.now()}`;
+  if (path.dirname(tmpPath) !== path.dirname(MINI_AGENT_CONFIG_PATH)) {
+    return { ok: false, reason: "tmpfile-not-same-dir" };
+  }
+
+  try {
+    await withLockAsync(MINI_AGENT_LOCK_PATH, async () => {
+      fs.writeFileSync(tmpPath, next, { mode: 0o600 });
+      fsyncAndRename(tmpPath, MINI_AGENT_CONFIG_PATH);
+    });
+  } catch (err) {
+    try { fs.unlinkSync(tmpPath); } catch {}
+    return { ok: false, reason: `lock-or-write-failed: ${err.message}` };
+  }
+
+  _invalidateConfigCache();
+  return { ok: true, lineNumber: gate.lineNumber, form: "D" };
+}
