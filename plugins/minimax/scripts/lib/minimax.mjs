@@ -946,3 +946,98 @@ export async function getMiniAgentAuthStatus(cwd) {
   }
   return { loggedIn: false, reason: cls.status, detail: cls.detail || cls.reason || null };
 }
+
+// -- Review output validator (Phase 3 Task 3.1) ------------------------------
+// Hand-rolled draft 2020-12 subset -- covers only the keywords used by
+// plugins/minimax/schemas/review-output.schema.json:
+//   type / required / enum / items / properties / minLength / minimum / maximum
+// Intentionally NOT a general-purpose validator. Adding deps (ajv etc.) would
+// inflate install footprint for a single schema.
+
+let _schemaCache = new Map();
+
+function loadSchema(schemaPath) {
+  if (_schemaCache.has(schemaPath)) return _schemaCache.get(schemaPath);
+  const text = fs.readFileSync(schemaPath, "utf8");
+  const schema = JSON.parse(text);
+  _schemaCache.set(schemaPath, schema);
+  return schema;
+}
+
+export function _invalidateSchemaCache() { _schemaCache = new Map(); }
+
+function typeMatches(value, expected) {
+  if (expected === "integer") return Number.isInteger(value);
+  if (expected === "number") return typeof value === "number" && !Number.isNaN(value);
+  if (expected === "string") return typeof value === "string";
+  if (expected === "array") return Array.isArray(value);
+  if (expected === "object") return value && typeof value === "object" && !Array.isArray(value);
+  if (expected === "boolean") return typeof value === "boolean";
+  if (expected === "null") return value === null;
+  return false;
+}
+
+function validateNode(value, node, pathParts, errors) {
+  const pathStr = pathParts.length === 0 ? "(root)" : pathParts.join(".");
+
+  if (node.type) {
+    if (!typeMatches(value, node.type)) {
+      errors.push(`${pathStr}: type expected ${node.type}, got ${Array.isArray(value) ? "array" : typeof value}`);
+      return;
+    }
+  }
+
+  if (node.enum && !node.enum.includes(value)) {
+    errors.push(`${pathStr}: enum violation (got ${JSON.stringify(value)}; allowed ${JSON.stringify(node.enum)})`);
+  }
+
+  if (node.type === "string") {
+    if (typeof node.minLength === "number" && value.length < node.minLength) {
+      errors.push(`${pathStr}: minLength ${node.minLength} not met (got length ${value.length})`);
+    }
+  }
+
+  if (node.type === "integer" || node.type === "number") {
+    if (typeof node.minimum === "number" && value < node.minimum) {
+      errors.push(`${pathStr}: minimum ${node.minimum} not met (got ${value})`);
+    }
+    if (typeof node.maximum === "number" && value > node.maximum) {
+      errors.push(`${pathStr}: maximum ${node.maximum} exceeded (got ${value})`);
+    }
+  }
+
+  if (node.type === "object") {
+    if (Array.isArray(node.required)) {
+      for (const key of node.required) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) {
+          errors.push(`${pathStr === "(root)" ? key : pathStr + "." + key}: required key missing`);
+        }
+      }
+    }
+    if (node.properties) {
+      for (const [key, sub] of Object.entries(node.properties)) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) {
+          validateNode(value[key], sub, [...pathParts, key], errors);
+        }
+      }
+    }
+  }
+
+  if (node.type === "array" && node.items) {
+    for (let i = 0; i < value.length; i++) {
+      validateNode(value[i], node.items, [...pathParts, `[${i}]`], errors);
+    }
+  }
+}
+
+export function validateReviewOutput(data, schemaPath) {
+  const errors = [];
+  let schema;
+  try {
+    schema = loadSchema(schemaPath);
+  } catch (err) {
+    return { ok: false, errors: [`schema-load: ${err.code || err.message}`] };
+  }
+  validateNode(data, schema, [], errors);
+  return { ok: errors.length === 0, errors };
+}
