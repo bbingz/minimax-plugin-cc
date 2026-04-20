@@ -125,3 +125,129 @@ test("validateReviewOutput: nested error path uses findings[0].X not findings.[0
   assert.ok(hit.includes("findings[0].confidence"), `expected 'findings[0].confidence' in path; got: ${hit}`);
   assert.ok(!hit.includes("findings.[0]"), `legacy dotted-bracket path leaked: ${hit}`);
 });
+
+// ── Task 3.3 tests: buildReviewPrompt + extractReviewJson ────────────────
+
+import { buildReviewPrompt, extractReviewJson } from "./minimax.mjs";
+
+test("buildReviewPrompt: inlines schema + focus + context, no retry hint first-shot", () => {
+  const prompt = buildReviewPrompt({
+    schemaPath: SCHEMA_PATH,
+    focus: "Check for auth leaks.",
+    context: "diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n",
+  });
+  assert.ok(prompt.includes('"type": "object"'), "schema inlined");
+  assert.ok(prompt.includes("Check for auth leaks."), "focus inlined");
+  assert.ok(prompt.includes("+new"), "context inlined");
+  assert.ok(!prompt.includes("Retry note"), "no retry hint on first shot");
+  assert.ok(!prompt.includes("{{SCHEMA_JSON}}"), "no unreplaced placeholders");
+  assert.ok(!prompt.includes("{{FOCUS}}"));
+  assert.ok(!prompt.includes("{{CONTEXT}}"));
+  assert.ok(!prompt.includes("{{RETRY_HINT}}"));
+});
+
+test("buildReviewPrompt: retry hint expands when retryHint provided", () => {
+  const prompt = buildReviewPrompt({
+    schemaPath: SCHEMA_PATH,
+    focus: "x",
+    context: "y",
+    retryHint: "missing key: verdict",
+  });
+  assert.ok(prompt.includes("# Retry note"));
+  assert.ok(prompt.includes("missing key: verdict"));
+});
+
+test("buildReviewPrompt: empty focus renders as literal '(no additional focus provided)'", () => {
+  const prompt = buildReviewPrompt({
+    schemaPath: SCHEMA_PATH,
+    focus: "",
+    context: "x",
+  });
+  assert.ok(prompt.includes("(no additional focus provided)"));
+});
+
+test("buildReviewPrompt: throws on unreadable schema path", () => {
+  assert.throws(
+    () => buildReviewPrompt({ schemaPath: "/no/such/file.json", focus: "", context: "" }),
+    /schema-load|ENOENT/
+  );
+});
+
+test("extractReviewJson: raw JSON object", () => {
+  const raw = '{"verdict":"approve","summary":"ok","findings":[],"next_steps":[]}';
+  const r = extractReviewJson(raw);
+  assert.equal(r.ok, true);
+  assert.equal(r.data.verdict, "approve");
+});
+
+test("extractReviewJson: fenced with ```json", () => {
+  const raw = "```json\n{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"next_steps\":[]}\n```";
+  const r = extractReviewJson(raw);
+  assert.equal(r.ok, true);
+  assert.equal(r.data.verdict, "approve");
+});
+
+test("extractReviewJson: fenced without language tag", () => {
+  const raw = "```\n{\"verdict\":\"needs-attention\",\"summary\":\"x\",\"findings\":[],\"next_steps\":[]}\n```";
+  const r = extractReviewJson(raw);
+  assert.equal(r.ok, true);
+  assert.equal(r.data.verdict, "needs-attention");
+});
+
+test("extractReviewJson: prose before + raw object after", () => {
+  const raw = 'Here is the review:\n{"verdict":"approve","summary":"ok","findings":[],"next_steps":[]}';
+  const r = extractReviewJson(raw);
+  assert.equal(r.ok, true);
+  assert.equal(r.data.verdict, "approve");
+});
+
+test("extractReviewJson: malformed JSON returns parse error", () => {
+  const raw = '{"verdict":"approve", invalid}';
+  const r = extractReviewJson(raw);
+  assert.equal(r.ok, false);
+  assert.ok(r.error);
+  assert.ok(r.parseError);
+});
+
+test("extractReviewJson: no JSON at all", () => {
+  const r = extractReviewJson("I'm not going to answer that.");
+  assert.equal(r.ok, false);
+  assert.match(r.error, /no-json-found/);
+});
+
+test("extractReviewJson: empty fence yields parse error (v2 — Codex #7)", () => {
+  const raw = "```json\n\n```";
+  const r = extractReviewJson(raw);
+  assert.equal(r.ok, false);
+});
+
+test("extractReviewJson: two JSON objects in a row — returns the first complete one (v2 — Codex #2)", () => {
+  const raw = '{"thinking":"let me review"}\n\n{"verdict":"approve","summary":"ok","findings":[],"next_steps":[]}';
+  const r = extractReviewJson(raw);
+  assert.equal(r.ok, true);
+  assert.equal(r.data.thinking, "let me review", "brace-balanced scan returns FIRST complete object");
+});
+
+test("buildReviewPrompt: previousRaw injected under heading, redacted, capped at 1500 chars (v2 — Codex #3)", () => {
+  const prompt = buildReviewPrompt({
+    schemaPath: SCHEMA_PATH,
+    focus: "x",
+    context: "y",
+    retryHint: "schema error: verdict missing",
+    previousRaw: "Before my real answer, here's the key: sk-abc12345678901234567890 — then I gave up.",
+  });
+  assert.ok(prompt.includes("# Retry note"));
+  assert.ok(prompt.includes("schema error: verdict missing"));
+  assert.ok(prompt.includes("## Previous response"));
+  assert.ok(prompt.includes("sk-***REDACTED***"), "api key redacted");
+  assert.ok(!prompt.includes("sk-abc12345678901234567890"), "raw key not present");
+});
+
+test("buildReviewPrompt: no previousRaw means no 'Previous response' heading (v2)", () => {
+  const prompt = buildReviewPrompt({
+    schemaPath: SCHEMA_PATH, focus: "x", context: "y",
+    retryHint: "some hint",
+  });
+  assert.ok(prompt.includes("# Retry note"));
+  assert.ok(!prompt.includes("## Previous response"));
+});

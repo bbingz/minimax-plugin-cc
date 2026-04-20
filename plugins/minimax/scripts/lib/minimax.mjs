@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
+import { fileURLToPath } from "node:url";
 import { binaryAvailable } from "./process.mjs";
 import { withLockAsync } from "./state.mjs";
 
@@ -1060,4 +1061,124 @@ export function validateReviewOutput(data, schemaPath) {
   }
   validateNode(data, schema, [], errors);
   return { ok: errors.length === 0, errors };
+}
+
+// ── Review prompt builder + JSON extractor (Phase 3 Task 3.3; v2 revised) ───
+
+const REVIEW_PROMPT_PATH = path.resolve(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "prompts", "review.md")
+);
+
+let _reviewTemplateCache = null;
+
+function loadReviewTemplate() {
+  if (_reviewTemplateCache !== null) return _reviewTemplateCache;
+  _reviewTemplateCache = fs.readFileSync(REVIEW_PROMPT_PATH, "utf8");
+  return _reviewTemplateCache;
+}
+
+export function _invalidateReviewTemplateCache() { _reviewTemplateCache = null; }
+
+/**
+ * Build the review prompt by substituting placeholders in prompts/review.md.
+ *
+ * @param {object} opts
+ * @param {string} opts.schemaPath   — absolute path to the review schema JSON
+ * @param {string} opts.focus        — user-provided focus hint (may be empty)
+ * @param {string} opts.context      — full diff text
+ * @param {string} [opts.retryHint]  — if non-empty, render a "# Retry note" block
+ * @param {string} [opts.previousRaw]— v2 (Codex #3): prior failed response to echo
+ *                                     back into the retry prompt (redacted, capped 1500)
+ * @returns {string}
+ */
+export function buildReviewPrompt({ schemaPath, focus, context, retryHint, previousRaw }) {
+  const schemaText = fs.readFileSync(schemaPath, "utf8");
+  const template = loadReviewTemplate();
+  const focusRendered = (focus && focus.trim()) ? focus : "(no additional focus provided)";
+
+  let retryBlock = "";
+  if (retryHint && retryHint.trim()) {
+    const lines = [
+      "# Retry note",
+      "",
+      `Your previous response failed validation: ${retryHint}. Output RAW JSON ONLY matching the schema above — no code fences, no preamble.`,
+    ];
+    if (previousRaw && previousRaw.trim()) {
+      const redacted = redactSecrets(String(previousRaw)).slice(0, 1500);
+      lines.push("");
+      lines.push("## Previous response (verbatim, first 1500 chars, secrets redacted)");
+      lines.push("");
+      lines.push(redacted);
+    }
+    retryBlock = lines.join("\n");
+  }
+
+  const result = template
+    .replace("{{SCHEMA_JSON}}", schemaText)
+    .replace("{{FOCUS}}", focusRendered)
+    .replace("{{CONTEXT}}", context)
+    .replace("{{RETRY_HINT}}", retryBlock);
+  return result.trimEnd();
+}
+
+/**
+ * Pull a JSON object out of an assistant response that may include code fences
+ * or surrounding prose. Returns {ok, data} or {ok:false, error, parseError?}.
+ *
+ * v2 (Codex #2): the raw-slice branch now uses a brace-balanced scanner that
+ * returns the FIRST COMPLETE JSON object, not the span from first { to last }
+ * (which would fuse separate objects if the model emitted reasoning then answer).
+ */
+export function extractReviewJson(raw) {
+  if (typeof raw !== "string" || raw.length === 0) {
+    return { ok: false, error: "empty-response" };
+  }
+
+  const trimmed = raw.trim();
+
+  // Case 1: fenced block ```[json]? ... ```
+  const fenceMatch = trimmed.match(/```(?:json|JSON)?\s*\n([\s\S]*?)\n```/);
+  if (fenceMatch) {
+    const inner = fenceMatch[1].trim();
+    if (!inner) return { ok: false, error: "fenced-empty", parseError: null };
+    try {
+      return { ok: true, data: JSON.parse(inner) };
+    } catch (e) {
+      return { ok: false, error: "fenced-parse-failed", parseError: e.message };
+    }
+  }
+
+  // Case 2: brace-balanced scan — find FIRST complete top-level { ... } object.
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (inString) {
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') { inString = false; }
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+      continue;
+    }
+    if (ch === "}") {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        const candidate = trimmed.slice(start, i + 1);
+        try {
+          return { ok: true, data: JSON.parse(candidate) };
+        } catch (e) {
+          return { ok: false, error: "raw-parse-failed", parseError: e.message };
+        }
+      }
+    }
+  }
+
+  return { ok: false, error: "no-json-found" };
 }
