@@ -437,6 +437,127 @@ export function spawnWithHardTimeout(bin, args, options = {}) {
   });
 }
 
+// ── callMiniAgent (spec §3.2, §3.3) ─────────────────────────────────────────
+// Reuses MINI_AGENT_LOG_DIR / MINI_AGENT_BIN constants (exported at file top,
+// honoring env overrides MINI_AGENT_LOG_DIR / MINI_AGENT_BIN for tests).
+
+function snapshotLogDir(dir) {
+  try {
+    return new Set(fs.readdirSync(dir).filter(name => name.endsWith(".log")));
+  } catch {
+    return new Set();
+  }
+}
+
+function diffLogSnapshot(beforeSet, dir) {
+  let afterFiles;
+  try { afterFiles = fs.readdirSync(dir).filter(name => name.endsWith(".log")); }
+  catch { return null; }
+
+  const novel = afterFiles.filter(name => !beforeSet.has(name));
+  if (novel.length === 0) return null;
+  // Multiple new logs → v0.1 does not disambiguate (P0.10 conditional gate FAIL;
+  // Phase 4 must serialize). Pick latest mtime as a best-guess; single-spawn
+  // case only yields one novel entry anyway.
+  const stats = novel.map(name => {
+    const p = path.join(dir, name);
+    let mtimeMs = 0;
+    try { mtimeMs = fs.statSync(p).mtimeMs; } catch {}
+    return { p, mtimeMs };
+  });
+  stats.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return stats[0].p;
+}
+
+/**
+ * Spawn mini-agent one-shot, pipe stdout to progress callback, capture Log file
+ * line (fallback: snapshot diff), then parse log on close.
+ *
+ * Returns raw context — callers run `classifyMiniAgentResult` (Task 2.3) to
+ * map to a status.
+ *
+ * @param {object} opts
+ * @param {string} opts.prompt
+ * @param {string} [opts.cwd]
+ * @param {number} [opts.timeout=120000]
+ * @param {string[]} [opts.extraArgs=[]]
+ * @param {(line:string)=>void} [opts.onProgressLine]
+ * @param {string} [opts.bin=MINI_AGENT_BIN]
+ * @param {string} [opts.logDir=MINI_AGENT_LOG_DIR]
+ * @param {NodeJS.ProcessEnv} [opts.env]
+ * @returns {Promise<object>}
+ */
+export async function callMiniAgent({
+  prompt,
+  cwd,
+  timeout = 120_000,
+  extraArgs = [],
+  onProgressLine,
+  bin = MINI_AGENT_BIN,
+  logDir = MINI_AGENT_LOG_DIR,
+  env,
+} = {}) {
+  if (typeof prompt !== "string" || prompt.length === 0) {
+    throw new Error("callMiniAgent: prompt must be a non-empty string");
+  }
+  const resolvedCwd = cwd || process.cwd();
+
+  const beforeSet = snapshotLogDir(logDir);
+
+  let capturedLogPath = null;
+  let linesSeen = 0;
+
+  const forwardLine = (line) => {
+    linesSeen += 1;
+    // spec §3.3: regex-scan first 30 stdout lines for "Log file:"
+    if (!capturedLogPath && linesSeen <= 30) {
+      const m = line.match(/Log file:\s+(\S+\.log)/);
+      if (m) capturedLogPath = m[1];
+    }
+    if (typeof onProgressLine === "function") {
+      try { onProgressLine(line); } catch {}
+    }
+  };
+
+  const args = ["-t", prompt, "-w", resolvedCwd, ...extraArgs];
+  const result = await spawnWithHardTimeout(bin, args, {
+    cwd: resolvedCwd,
+    env,
+    timeoutMs: timeout,
+    onStdoutLine: forwardLine,
+  });
+
+  // Fallback: stdout didn't surface logPath → diff snapshot
+  let logPath = capturedLogPath;
+  if (!logPath) {
+    logPath = diffLogSnapshot(beforeSet, logDir);
+  }
+
+  let logParse = null;
+  if (logPath) {
+    try {
+      logParse = await parseFinalResponseFromLog(logPath);
+    } catch (err) {
+      logParse = { ok: false, partial: true, reason: `log-parse-threw: ${err.code || err.message}`, response: "", toolCalls: [] };
+    }
+  }
+
+  return {
+    prompt,
+    cwd: resolvedCwd,
+    exitCode: result.exitCode,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    spawnError: result.spawnError,
+    rawStdout: result.stdout,
+    rawStderr: result.stderr,
+    stdoutTruncated: result.stdoutTruncated,
+    stderrTruncated: result.stderrTruncated,
+    logPath,
+    logParse,
+  };
+}
+
 // ── Log path extraction & response parsing (spec §3.5, state machine; P0.2 schema) ─
 
 export function extractLogPathFromStdout(stdoutOrFirstLines) {
