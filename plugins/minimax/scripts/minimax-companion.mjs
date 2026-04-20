@@ -1,7 +1,9 @@
 #!/usr/bin/env node
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import {
@@ -20,6 +22,13 @@ import {
   defaultWorkspaceRoot,
   acquireQueueSlot,
   releaseQueueSlot,
+  createJob,
+  readJob,
+  updateJobMeta,
+  listJobs,
+  filterJobsBySession,
+  cancelJob,
+  jobDir,
 } from "./lib/job-control.mjs";
 
 const USAGE = `Usage: minimax-companion <subcommand> [options]
@@ -49,6 +58,27 @@ Subcommands:
                       4 = mini-agent call failed
                       5 = parse/validate failed even after 1 retry
                       6 = git command failed
+
+  rescue [--json] [--sandbox] [--background] [--timeout <ms>] [--cwd <path>]
+         <prompt>
+                    Delegate a multi-step agent task. Default workdir = caller
+                    cwd; --sandbox uses jobs/<jobId>/workspace/ (isolated
+                    workdir, NOT a security boundary). --background detaches a
+                    worker and returns jobId immediately. Serial execution
+                    (P0.10): only one mini-agent spawn in flight at a time.
+
+  status [--json] [--all] [<jobId>]
+                    List current-session jobs (or --all). With <jobId>: snapshot.
+
+  result [--json] <jobId>
+                    Print a finished job's final response.
+
+  cancel [--json] [--keep-workspace] <jobId>
+                    SIGTERM -> 5s -> SIGKILL. Removes sandbox workspace by default.
+
+  task-resume-candidate [--json]
+                    List the 5 most recent ~/.mini-agent/log/ files
+                    (v0.1 informational; Mini-Agent has no resume — P0.9).
 `;
 
 function maskApiKey(k) {
@@ -452,6 +482,365 @@ async function runReview(rawArgs) {
   }
 }
 
+// ── Task 4.4/4.5: runRescue (foreground + --background) ──────────────────
+
+async function runRescue(rawArgs) {
+  const { options, positionals } = parseArgs(rawArgs, {
+    booleanOptions: ["json", "sandbox", "background"],
+    valueOptions: ["timeout", "cwd"],
+  });
+
+  const prompt = positionals.join(" ").trim();
+  if (!prompt) {
+    if (options.json) process.stdout.write(JSON.stringify({ status: "bad-input", reason: "prompt is empty" }) + "\n");
+    else process.stderr.write("Error: prompt is required\n");
+    process.exit(1);
+  }
+  const timeout = options.timeout ? Number(options.timeout) : 300_000;
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    if (options.json) process.stdout.write(JSON.stringify({ status: "bad-input", reason: `invalid --timeout '${options.timeout}'` }) + "\n");
+    else process.stderr.write(`Error: invalid --timeout '${options.timeout}'\n`);
+    process.exit(1);
+  }
+  const cwd = options.cwd || process.cwd();
+  const sandbox = Boolean(options.sandbox);
+  const sessionId = process.env.MINIMAX_COMPANION_SESSION_ID || null;
+  const workspaceRoot = defaultWorkspaceRoot();
+
+  // ── Background: detach worker, exit immediately with jobId ────────
+  if (options.background) {
+    const { jobId, meta: jobMeta } = createJob({
+      workspaceRoot, prompt, cwd, sandbox, sessionId, extraArgs: [], timeout,
+    });
+    const slot = await acquireQueueSlot(workspaceRoot, { maxWaitMs: 60_000 });
+    if (!slot.acquired) {
+      await updateJobMeta(workspaceRoot, jobId, { status: "failed", endedAt: Date.now(), error: "queue-timeout" });
+      const payload = { status: "queue-timeout", jobId };
+      if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+      else process.stderr.write(`Error: queue-timeout (jobId=${jobId})\n`);
+      process.exit(4);
+    }
+    await updateJobMeta(workspaceRoot, jobId, { queueToken: slot.token });
+
+    const script = fileURLToPath(import.meta.url);
+    const child = spawn(process.execPath, [script, "_worker", jobId, "--workspace-root", workspaceRoot], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, MINIMAX_COMPANION_SESSION_ID: sessionId || "" },
+    });
+    child.unref();
+
+    await updateJobMeta(workspaceRoot, jobId, { pid: child.pid, status: "starting" });
+    const payload = { jobId, status: "starting", workdir: jobMeta.workdir };
+    if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    else process.stdout.write(`Rescue job ${jobId} started in background. Poll with /minimax:status ${jobId}.\n`);
+    process.exit(0);
+  }
+
+  // ── Foreground: create job, acquire queue, run, release ─────────────
+  const { jobId, meta } = createJob({ workspaceRoot, prompt, cwd, sandbox, sessionId, timeout });
+  if (!options.json) {
+    process.stdout.write(`Rescue job ${jobId} created (workdir=${meta.workdir}${sandbox ? ", sandbox" : ""}).\n`);
+    process.stdout.write("Waiting for queue slot...\n");
+  }
+
+  const slot = await acquireQueueSlot(workspaceRoot, { maxWaitMs: timeout + 30_000 });
+  if (!slot.acquired) {
+    await updateJobMeta(workspaceRoot, jobId, { status: "failed", endedAt: Date.now() });
+    const payload = { status: "queue-timeout", jobId, detail: slot.reason };
+    if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    else process.stderr.write(`Error: queue-timeout (${slot.reason})\n`);
+    process.exit(4);
+  }
+
+  try {
+    if (!options.json) process.stdout.write("Starting MiniMax (cold start ~3s)...\n");
+    await updateJobMeta(workspaceRoot, jobId, { status: "running", startedAt: Date.now(), pid: process.pid });
+
+    const onProgressLine = options.json ? undefined : (line) => process.stdout.write(stripAnsiSgr(line) + "\n");
+    const result = await callMiniAgent({ prompt, cwd: meta.workdir, timeout, onProgressLine });
+    const cls = classifyMiniAgentResult(result);
+
+    await updateJobMeta(workspaceRoot, jobId, {
+      status: (cls.status === "success" || cls.status === "success-but-truncated") ? "done" : "failed",
+      endedAt: Date.now(),
+      exitCode: result.exitCode,
+      signal: result.signal,
+      miniAgentLogPath: cls.logPath,
+      stdoutTruncated: result.stdoutTruncated,
+      stderrTruncated: result.stderrTruncated,
+      classifyStatus: cls.status,
+      response: cls.response ?? null,
+      finishReason: cls.finishReason ?? null,
+    });
+
+    const jDir = jobDir(workspaceRoot, jobId);
+    fs.writeFileSync(path.join(jDir, "stdout.log"), String(result.rawStdout || ""), "utf8");
+    fs.writeFileSync(path.join(jDir, "stderr.log"), String(result.rawStderr || ""), "utf8");
+
+    const exitCode = STATUS_EXIT_CODE[cls.status] ?? 5;
+    if (options.json) {
+      const payload = (cls.status === "success" || cls.status === "success-but-truncated")
+        ? { jobId, status: cls.status, response: cls.response, toolCalls: cls.toolCalls, finishReason: cls.finishReason, thinking: cls.thinking, logPath: cls.logPath }
+        : { jobId, status: cls.status, reason: cls.reason ?? null, detail: cls.detail ?? null, logPath: cls.logPath ?? null, diagnostic: cls.diagnostic ?? null };
+      process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    } else if (cls.status === "success" || cls.status === "success-but-truncated") {
+      const cfg = readMiniAgentConfig();
+      process.stdout.write("\n---\n" + cls.response + "\n");
+      const footer = [];
+      if (cfg.model) footer.push(`model: ${cfg.model}`);
+      if (cls.logPath) footer.push(`log: ${cls.logPath}`);
+      footer.push(`job: ${jobId}`);
+      if (cls.status === "success-but-truncated") footer.push("truncated");
+      process.stdout.write(`(${footer.join(" \u00B7 ")})\n`);
+    } else {
+      process.stderr.write(`Error: ${cls.status}${cls.detail ? " -- " + cls.detail : ""}\n`);
+      if (cls.diagnostic && cls.diagnostic.stderrHeadTail) {
+        process.stderr.write(`\n--- diagnostic (stderr head+tail, ANSI stripped) ---\n${cls.diagnostic.stderrHeadTail}\n`);
+      }
+      process.stderr.write(`job: ${jobId}\n`);
+    }
+    process.exit(exitCode);
+  } finally {
+    releaseQueueSlot(workspaceRoot, slot.token);
+  }
+}
+
+// ── Task 4.5: _worker (internal detached subprocess) ─────────────────────
+
+async function runWorker(rawArgs) {
+  const { options, positionals } = parseArgs(rawArgs, {
+    valueOptions: ["workspace-root"],
+  });
+  const jobId = positionals[0];
+  if (!jobId) { process.stderr.write("_worker: missing jobId\n"); process.exit(2); }
+  const workspaceRoot = options["workspace-root"] || defaultWorkspaceRoot();
+  const meta = readJob(workspaceRoot, jobId);
+  if (!meta) { process.stderr.write(`_worker: job ${jobId} not found\n`); process.exit(2); }
+
+  let exitCode = 0;
+  try {
+    await updateJobMeta(workspaceRoot, jobId, { status: "running", startedAt: Date.now(), pid: process.pid });
+
+    const jDir = jobDir(workspaceRoot, jobId);
+    const stdoutFile = path.join(jDir, "stdout.log");
+    const stderrFile = path.join(jDir, "stderr.log");
+    const stdoutWs = fs.createWriteStream(stdoutFile, { flags: "a" });
+    const onProgressLine = (line) => { try { stdoutWs.write(stripAnsiSgr(line) + "\n"); } catch {} };
+
+    let result, cls;
+    try {
+      result = await callMiniAgent({
+        prompt: meta.prompt,
+        cwd: meta.workdir,
+        timeout: meta.timeout || 300_000,
+        extraArgs: meta.extraArgs || [],
+        onProgressLine,
+      });
+      cls = classifyMiniAgentResult(result);
+    } catch (err) {
+      try {
+        await updateJobMeta(workspaceRoot, jobId, {
+          status: "failed",
+          endedAt: Date.now(),
+          error: redactSecrets(err.message || String(err)),
+        });
+      } catch { /* keep going to finally */ }
+      try { fs.writeFileSync(stderrFile, `worker exception: ${err.message}\n`, "utf8"); } catch {}
+      stdoutWs.end();
+      exitCode = 2;
+      return;
+    }
+
+    try { fs.writeFileSync(stderrFile, String(result.rawStderr || ""), "utf8"); } catch {}
+    stdoutWs.end();
+
+    try {
+      await updateJobMeta(workspaceRoot, jobId, {
+        status: (cls.status === "success" || cls.status === "success-but-truncated") ? "done" : "failed",
+        endedAt: Date.now(),
+        exitCode: result.exitCode,
+        signal: result.signal,
+        miniAgentLogPath: cls.logPath,
+        stdoutTruncated: result.stdoutTruncated,
+        stderrTruncated: result.stderrTruncated,
+        classifyStatus: cls.status,
+        response: cls.response ?? null,
+        finishReason: cls.finishReason ?? null,
+      });
+    } catch { /* finally still releases queue */ }
+  } finally {
+    if (meta.queueToken) releaseQueueSlot(workspaceRoot, meta.queueToken);
+  }
+  process.exit(exitCode);
+}
+
+// ── Task 4.6: status / result / cancel / task-resume-candidate ───────────
+
+function formatElapsed(startMs, endMs) {
+  if (!startMs) return "?";
+  const dt = Math.max(0, (endMs || Date.now()) - startMs);
+  const s = Math.floor(dt / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), r = s % 60;
+  return `${m}m${r}s`;
+}
+
+async function runStatus(rawArgs) {
+  const { options, positionals } = parseArgs(rawArgs, { booleanOptions: ["json", "all"] });
+  const workspaceRoot = defaultWorkspaceRoot();
+  const sessionId = process.env.MINIMAX_COMPANION_SESSION_ID || null;
+
+  if (positionals[0]) {
+    const jobId = positionals[0];
+    const meta = readJob(workspaceRoot, jobId);
+    if (!meta) {
+      if (options.json) process.stdout.write(JSON.stringify({ status: "not-found", jobId }) + "\n");
+      else process.stderr.write(`Job not found: ${jobId}\n`);
+      process.exit(2);
+    }
+    if (options.json) {
+      process.stdout.write(JSON.stringify(meta, null, 2) + "\n");
+    } else {
+      process.stdout.write(`${meta.jobId}  ${meta.status}  (${formatElapsed(meta.startedAt, meta.endedAt)})\n`);
+      process.stdout.write(`  prompt: ${(meta.prompt || "").slice(0, 80)}${(meta.prompt || "").length > 80 ? "..." : ""}\n`);
+      process.stdout.write(`  workdir: ${meta.workdir}${meta.sandbox ? "  (sandbox)" : ""}\n`);
+      if (meta.miniAgentLogPath) process.stdout.write(`  log: ${meta.miniAgentLogPath}\n`);
+    }
+    process.exit(0);
+  }
+
+  let jobs = listJobs(workspaceRoot);
+  if (!options.all) jobs = filterJobsBySession(jobs, sessionId);
+  if (options.json) {
+    process.stdout.write(JSON.stringify(jobs, null, 2) + "\n");
+  } else if (jobs.length === 0) {
+    process.stdout.write("(no jobs for this session; use --all for all sessions)\n");
+  } else {
+    for (const j of jobs) {
+      process.stdout.write(`${j.jobId}  ${j.status.padEnd(9)}  ${formatElapsed(j.startedAt, j.endedAt).padStart(6)}  ${(j.prompt || "").slice(0, 60)}\n`);
+    }
+  }
+  process.exit(0);
+}
+
+async function runResult(rawArgs) {
+  const { options, positionals } = parseArgs(rawArgs, { booleanOptions: ["json"] });
+  const jobId = positionals[0];
+  if (!jobId) {
+    if (options.json) process.stdout.write(JSON.stringify({ status: "bad-input", reason: "jobId required" }) + "\n");
+    else process.stderr.write("Error: jobId required\n");
+    process.exit(1);
+  }
+  const workspaceRoot = defaultWorkspaceRoot();
+  const meta = readJob(workspaceRoot, jobId);
+  if (!meta) {
+    if (options.json) process.stdout.write(JSON.stringify({ status: "not-found", jobId }) + "\n");
+    else process.stderr.write(`Job not found: ${jobId}\n`);
+    process.exit(2);
+  }
+  if (meta.status !== "done" && meta.status !== "failed" && meta.status !== "canceled") {
+    if (options.json) process.stdout.write(JSON.stringify({ status: "not-finished", currentStatus: meta.status, jobId }) + "\n");
+    else process.stderr.write(`Job ${jobId} is ${meta.status}; not yet finished\n`);
+    process.exit(2);
+  }
+
+  if (options.json) {
+    const payload = {
+      jobId: meta.jobId,
+      status: meta.status,
+      classifyStatus: meta.classifyStatus,
+      response: meta.response,
+      finishReason: meta.finishReason,
+      miniAgentLogPath: meta.miniAgentLogPath,
+      sandbox: meta.sandbox,
+      workdir: meta.workdir,
+      startedAt: meta.startedAt,
+      endedAt: meta.endedAt,
+      exitCode: meta.exitCode,
+      signal: meta.signal,
+      stdoutTruncated: meta.stdoutTruncated,
+      stderrTruncated: meta.stderrTruncated,
+      canceled: meta.canceled,
+    };
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+  } else {
+    const cfg = readMiniAgentConfig();
+    process.stdout.write(`job: ${meta.jobId}  status: ${meta.status}\n`);
+    if (meta.response) {
+      process.stdout.write("\n---\n" + meta.response + "\n");
+      const footer = [];
+      if (cfg.model) footer.push(`model: ${cfg.model}`);
+      if (meta.miniAgentLogPath) footer.push(`log: ${meta.miniAgentLogPath}`);
+      if (meta.finishReason) footer.push(`finish: ${meta.finishReason}`);
+      process.stdout.write(`(${footer.join(" \u00B7 ")})\n`);
+    } else {
+      process.stdout.write("(no response recorded)\n");
+      if (meta.miniAgentLogPath) process.stdout.write(`log: ${meta.miniAgentLogPath}\n`);
+    }
+  }
+  process.exit(0);
+}
+
+async function runCancel(rawArgs) {
+  const { options, positionals } = parseArgs(rawArgs, { booleanOptions: ["json", "keep-workspace"] });
+  const jobId = positionals[0];
+  if (!jobId) {
+    if (options.json) process.stdout.write(JSON.stringify({ status: "bad-input", reason: "jobId required" }) + "\n");
+    else process.stderr.write("Error: jobId required\n");
+    process.exit(1);
+  }
+  const workspaceRoot = defaultWorkspaceRoot();
+  const r = await cancelJob(workspaceRoot, jobId, { keepWorkspace: Boolean(options["keep-workspace"]) });
+  if (!r.ok) {
+    if (options.json) process.stdout.write(JSON.stringify({ status: r.reason }) + "\n");
+    else process.stderr.write(`Error: ${r.reason}\n`);
+    process.exit(2);
+  }
+  const payload = { status: r.alreadyFinished ? "already-finished" : "canceled", jobId, killed: r.killed };
+  if (options.json) process.stdout.write(JSON.stringify(payload) + "\n");
+  else process.stdout.write(`Job ${jobId} ${payload.status}${r.killed ? " (SIGTERM/SIGKILL)" : ""}.\n`);
+  process.exit(0);
+}
+
+async function runTaskResumeCandidate(rawArgs) {
+  const { options } = parseArgs(rawArgs, { booleanOptions: ["json"] });
+  const logDir = process.env.MINI_AGENT_LOG_DIR || path.join(os.homedir(), ".mini-agent", "log");
+  let files;
+  try {
+    files = fs.readdirSync(logDir)
+      .filter(f => f.startsWith("agent_run_") && f.endsWith(".log"))
+      .map(f => {
+        const full = path.join(logDir, f);
+        let mtimeMs = 0;
+        try { mtimeMs = fs.statSync(full).mtimeMs; } catch {}
+        return { name: f, path: full, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, 5);
+  } catch (err) {
+    const payload = { status: "log-dir-missing", detail: String(err.code || err.message), candidates: [] };
+    if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    else process.stderr.write(`Mini-Agent log dir not found: ${logDir}\n`);
+    process.exit(2);
+  }
+  const payload = {
+    status: "ok",
+    note: "v0.1 does NOT resume -- Mini-Agent has no external session id (P0.9). Informational only.",
+    candidates: files,
+  };
+  if (options.json) {
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+  } else {
+    process.stdout.write("Most recent Mini-Agent log files (v0.1 cannot resume; informational only):\n");
+    for (const f of files) {
+      process.stdout.write(`  ${new Date(f.mtimeMs).toISOString()}  ${f.path}\n`);
+    }
+    if (files.length === 0) process.stdout.write("  (none)\n");
+  }
+  process.exit(0);
+}
+
 async function main() {
   const argv = process.argv.slice(2);
 
@@ -469,6 +858,18 @@ async function main() {
       return await runAsk(rest);
     case "review":
       return await runReview(rest);
+    case "rescue":
+      return await runRescue(rest);
+    case "status":
+      return await runStatus(rest);
+    case "result":
+      return await runResult(rest);
+    case "cancel":
+      return await runCancel(rest);
+    case "task-resume-candidate":
+      return await runTaskResumeCandidate(rest);
+    case "_worker":
+      return await runWorker(rest);
     case undefined:
     case "--help":
     case "-h":
