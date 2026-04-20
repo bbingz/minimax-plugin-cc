@@ -1209,6 +1209,21 @@ function reviewError({ error, firstRawText = null, rawText = null, parseError = 
   };
 }
 
+// Single source of truth for the success return — keeps `retriedOnce` derived
+// from `retry_used` (matching the reviewError pattern), so the two flags can
+// never drift out of sync at different call sites.
+function reviewSuccess(data, { truncated, retry_used, retry_notice, logPath }) {
+  return {
+    ok: true,
+    ...data,
+    truncated,
+    retry_used,
+    retriedOnce: retry_used,
+    retry_notice,
+    logPath,
+  };
+}
+
 export async function callMiniAgentReview({
   context,
   focus = "",
@@ -1245,15 +1260,12 @@ export async function callMiniAgentReview({
   if (firstExtracted.ok) {
     firstValidation = validateReviewOutput(firstExtracted.data, schemaPath);
     if (firstValidation.ok) {
-      return {
-        ok: true,
-        ...firstExtracted.data,
+      return reviewSuccess(firstExtracted.data, {
         truncated: firstTruncated,
         retry_used: false,
-        retriedOnce: false,
         retry_notice: null,
         logPath: firstCls.logPath,
-      };
+      });
     }
   }
 
@@ -1311,13 +1323,10 @@ export async function callMiniAgentReview({
     });
   }
 
-  return {
-    ok: true,
-    ...retryExtracted.data,
+  return reviewSuccess(retryExtracted.data, {
     truncated: retryTruncated,
     retry_used: true,
-    retriedOnce: true,
     retry_notice: `Initial response failed; retry succeeded (hint: ${retryHint})`,
     logPath: retryCls.logPath,
-  };
+  });
 }
