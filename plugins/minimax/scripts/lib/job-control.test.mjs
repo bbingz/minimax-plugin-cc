@@ -156,6 +156,52 @@ test("releaseQueueSlot: unknown token leaves lock alone (defensive)", async () =
   releaseQueueSlot(root, slot.token);
 });
 
+// ── Task 4.3: cancelJob ─────────────────────────────────────────────────
+
+import { cancelJob } from "./job-control.mjs";
+import { spawn } from "node:child_process";
+
+test("cancelJob: marks as canceled even if pid is unknown", async () => {
+  const root = mkWorkspaceRoot();
+  const job = createJob({ workspaceRoot: root, prompt: "x", cwd: "/", sandbox: false, sessionId: "s" });
+  const r = await cancelJob(root, job.jobId);
+  assert.equal(r.ok, true);
+  assert.equal(r.alreadyFinished, true);
+  const meta = readJob(root, job.jobId);
+  assert.equal(meta.canceled, true);
+  assert.equal(meta.status, "canceled");
+});
+
+test("cancelJob: SIGTERM a live sleep child + marks canceled", async () => {
+  const root = mkWorkspaceRoot();
+  const job = createJob({ workspaceRoot: root, prompt: "x", cwd: "/", sandbox: false, sessionId: "s" });
+  const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  child.unref();
+  await updateJobMeta(root, job.jobId, { status: "running", pid: child.pid, startedAt: Date.now() });
+
+  const r = await cancelJob(root, job.jobId, { termGraceMs: 500 });
+  assert.equal(r.ok, true);
+  assert.equal(r.alreadyFinished, false);
+  const meta = readJob(root, job.jobId);
+  assert.equal(meta.canceled, true);
+  assert.equal(meta.status, "canceled");
+
+  await new Promise(resolve => setTimeout(resolve, 200));
+  try {
+    process.kill(child.pid, 0);
+    assert.fail("expected child to be gone");
+  } catch (e) {
+    assert.equal(e.code, "ESRCH");
+  }
+});
+
+test("cancelJob: missing job returns error", async () => {
+  const root = mkWorkspaceRoot();
+  const r = await cancelJob(root, "mj-no-such");
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "not-found");
+});
+
 test("acquireQueueSlot: two concurrent attempts serialize (FIFO-ish)", async () => {
   const root = mkWorkspaceRoot();
   const order = [];

@@ -195,3 +195,56 @@ export function releaseQueueSlot(workspaceRoot, token) {
   if (owner.token !== token) return;
   try { fs.rmSync(lockDir, { recursive: true, force: true }); } catch {}
 }
+
+// ── cancelJob (spec §4.3) ────────────────────────────────────────────────
+//
+// v0.1 known limit: the `kill(pid, 0)` liveness probe cannot distinguish
+// "our worker still alive" from "OS reused this pid for a new process".
+// Probability of pid reuse within termGraceMs is negligible on modern
+// systems (32-bit pid space on Linux, round-robin allocation on macOS).
+// v0.2 can tighten by comparing /proc/<pid>/stat start-time or using a
+// process-group kill.
+
+export async function cancelJob(workspaceRoot, jobId, { termGraceMs = 5000, keepWorkspace = false } = {}) {
+  const meta = readJob(workspaceRoot, jobId);
+  if (!meta) return { ok: false, reason: "not-found" };
+  if (meta.status === "done" || meta.status === "failed" || meta.status === "canceled") {
+    return { ok: true, alreadyFinished: true, previousStatus: meta.status };
+  }
+
+  let killed = false;
+  let alreadyFinished = false;
+  if (meta.pid && typeof meta.pid === "number") {
+    try {
+      process.kill(meta.pid, "SIGTERM");
+      const deadline = Date.now() + termGraceMs;
+      while (Date.now() < deadline) {
+        try { process.kill(meta.pid, 0); }
+        catch (e) { if (e.code === "ESRCH") { killed = true; break; } }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (!killed) {
+        try { process.kill(meta.pid, "SIGKILL"); killed = true; } catch {}
+      }
+    } catch (err) {
+      if (err.code === "ESRCH") alreadyFinished = true;
+    }
+  } else {
+    alreadyFinished = true;
+  }
+
+  await updateJobMeta(workspaceRoot, jobId, {
+    canceled: true,
+    status: "canceled",
+    endedAt: Date.now(),
+    signal: killed ? "SIGTERM_OR_SIGKILL" : null,
+  });
+
+  if (meta.sandbox && !keepWorkspace) {
+    try {
+      fs.rmSync(path.join(jobDir(workspaceRoot, jobId), "workspace"), { recursive: true, force: true });
+    } catch {}
+  }
+
+  return { ok: true, alreadyFinished, killed };
+}
