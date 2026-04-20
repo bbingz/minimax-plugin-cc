@@ -1,5 +1,33 @@
 # minimax plugin CHANGELOG
 
+## 2026-04-20 — Phase 3
+
+- Add /minimax:review command + companion runReview subcommand.
+- Add schemas/review-output.schema.json (draft 2020-12; byte-aligned with
+  gemini version except for $id URI and two minLength tightenings on
+  findings[].file and findings[].recommendation).
+- Add prompts/review.md (strict JSON-only review template; placeholders for
+  {{SCHEMA_JSON}}/{{FOCUS}}/{{CONTEXT}}/{{RETRY_HINT}} with post-substitute
+  leftover assertion).
+- Add buildReviewPrompt / extractReviewJson (brace-balanced scanner) /
+  validateReviewOutput (hand-rolled draft 2020-12 subset) / reviewSuccess /
+  reviewError / callMiniAgentReview.
+- callMiniAgentReview: 1-shot retry with error hint + verbatim redacted prior
+  response (first 1500 chars) echoed into the retry prompt.
+- Companion collectDiff runs git ls-files --unmerged first; auto-scope falls
+  working-tree -> staged -> branch (needs --base). Exit code map for
+  no-diff/no-base/bad-scope/merge-conflict-present/call-failed/
+  parse-validate-failed/git-diff-failed.
+- onProgressLine streams ANSI-stripped stdout to stderr in text mode (keeps
+  JSON mode clean).
+- Failure text-mode surfaces lastPartialResponseRaw + firstRawText + rawText,
+  each redacted and 1500-char capped.
+- Severity sort has ?? 99 defensive fallback.
+- retriedOnce spec §4.5 alias always derived from retry_used (one source).
+- Add minimax-result-handling references/review-render.md; explicit note that
+  the suspicious-tool-calls tripwire does NOT apply to review output.
+- Smoke: T5 (review --json, real 4-line diff, Coding Plan) PASS.
+
 ## 2026-04-20 — Phase 2
 
 - Add /minimax:ask command.

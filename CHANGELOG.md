@@ -1,4 +1,14 @@
 
+## 2026-04-20 22:40 [Claude sonnet executor] — Phase 3 complete (T5 PASS)
+
+- **status**: done
+- **scope**: Phase 3 — /minimax:review + schemas/review-output.schema.json + prompts/review.md + callMiniAgentReview (1-shot retry) + companion runReview + review-render skill reference. Live-verified against Coding Plan endpoint `api.minimaxi.com/anthropic` with model `MiniMax-M2.7-highspeed`.
+- **summary**: Hand-rolled draft 2020-12 subset validator (no ajv dep); buildReviewPrompt with placeholder substitution + defensive leftover-placeholder assertion + retry-hint block carrying verbatim prior response (redacted + 1500 char cap per spec §4.5); extractReviewJson uses brace-balanced scanner over string/escape states (not first-to-last slice); callMiniAgentReview wires build -> callMiniAgent -> classify -> extract -> validate -> retry-once-if-needed; reviewSuccess/reviewError helpers keep retriedOnce alias derived from retry_used in one place. Companion collects git diff (auto/working-tree/staged/branch) with upfront merge-conflict refusal via git ls-files --unmerged. All raw-text fields pass through redactSecrets; classifier success-but-truncated flag propagates into review result. Severity-sorted findings rendering with defensive ??99 fallback. Skill reference clarifies the suspicious-bash tripwire does NOT apply to review output. T5 smoke: real 4-line diff -> exit 0, status=ok, verdict=approve, findings_count=1, retry_used=false, retriedOnce=false, truncated=false (see doc/smoke/phase-3-T5.md).
+- **spec alignment**: schemas/review-output.schema.json byte-aligned with gemini except for the $id URI and two intentional tightenings — findings[].file.minLength:1 and findings[].recommendation.minLength:1. Registered as a minimax-specific divergence.
+- **phase 5 heads-up**: prompts/review.md placeholder scheme + brace-balanced extractor + 1-shot retry wiring are directly reusable for /minimax:adversarial-review. Phase 5 author should compose over these rather than duplicate.
+- **process**: 3-way plan review (Codex/Gemini/Claude) landed before execution; 15 revision entries traced. Each task dispatched to codex:codex-rescue for implementation, Claude sonnet for spec compliance review, superpowers:code-reviewer for code quality. Two-stage review caught 5 post-implementation issues (schema description drift, validator null/path bugs, placeholder-shadow risk, retriedOnce divergence risk, USAGE legend miss, severity-sort NaN risk) — all fixed on follow-up commits.
+- **next**: Phase 4 plan (/minimax:rescue + --sandbox + job-control MUST serialize per P0.10 + minimax-agent subagent + 2 hooks).
+
 ## 2026-04-20 19:25 [Claude sonnet executor] — Phase 2 complete (T2/T3/T10 all PASS)
 
 - **status**: done
