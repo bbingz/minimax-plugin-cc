@@ -274,7 +274,7 @@ input: text (UTF-8)
 output: { ok, reason, lineNumber, form? }
 
 step 1: reject BOM
-  if text.charCodeAt(0) === 0xFEFF → fail "BOM"
+  if text.charCodeAt(0) === 0xFEFF → fail "BOM at file start"
 
 step 2: scan top-level keys
   matches = []
@@ -315,13 +315,17 @@ step 4: classify form of single match
     // 找匹配的右 " —— 跳过 `\"` 转义
     // YAML double-quoted 允许 `\` 转义序列；`\` 在 double-quoted 串中仅表示转义
     // 状态机：遇 `\` 跳过下一字符，遇未转义 `"` 即闭合
-    findClosingDoubleQuote(v) → 若不闭合 or 闭合后还有非空白非注释内容 → fail "form-D-malformed"
+    findClosingDoubleQuote(v) →
+      若不闭合 → fail "form-D-unclosed"
+      若闭合后有非空白非注释内容 → fail "form-D-trailing-content"
     → ok, form = "D", accept
 
   // (F) single-quoted single-line
   if v starts with "'":
     // YAML single-quoted 里 `''` 是转义单引号；否则遇到 `'` 即闭合
-    findClosingSingleQuote(v) → 若不闭合 or 闭合后还有非空白非注释内容 → fail "form-S-malformed"
+    findClosingSingleQuote(v) →
+      若不闭合 → fail "form-S-unclosed"
+      若闭合后有非空白非注释内容 → fail "form-S-trailing-content"
     → ok, form = "S", accept
 
   // (G) plain scalar — 强制拒绝，要求用户加引号

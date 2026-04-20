@@ -128,6 +128,16 @@ test("Form D unclosed fails", () => {
   assertEqual(r.reason, "form-D-unclosed");
 });
 
+test("Form S unclosed fails", () => {
+  const r = validateYamlForApiKeyWrite("api_key: 'unclosed\nmodel: 'x'\n");
+  assertEqual(r.reason, "form-S-unclosed");
+});
+
+test("Form S with trailing content fails", () => {
+  const r = validateYamlForApiKeyWrite("api_key: 'foo' junk\nmodel: 'x'\n");
+  assertEqual(r.reason, "form-S-trailing-content");
+});
+
 test("Form S with doubled-single-quote passes", () => {
   const r = validateYamlForApiKeyWrite("api_key: 'it''s fine'\nmodel: 'x'\n");
   assertEqual(r.ok, true);
