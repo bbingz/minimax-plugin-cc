@@ -1,4 +1,11 @@
 
+## 2026-04-20 16:16 [Claude Sonnet 4.6 executor]
+
+- **status**: in-progress
+- **scope**: Phase 1 Task 1.1 (root files)
+- **summary**: .gitignore 扩充 + README.md + CLAUDE.md created; baseline complete for Phase 1.
+- **next**: Task 1.2 manifests.
+
 ## 2026-04-20 15:49 [executor]
 
 - **status**: in-progress

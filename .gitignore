@@ -5,3 +5,8 @@ node_modules/
 /plugins/minimax/scripts/*.tmp
 /plugins/minimax/scripts/*.bak
 **/.lock
+coverage/
+.env
+.env.local
+*.swp
+.cache/
