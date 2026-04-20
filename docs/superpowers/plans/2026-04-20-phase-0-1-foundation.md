@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Plan version**: **v3** — 整合 plan v2 review 反馈后的 9 条修正（CRITICAL: 漏 await / HIGH: stripInlineComment 位置、lock 损坏分支、Task 1.8/1.9 重构避免 stub 残留、P0.5 三级搜索、CHANGELOG 硬门契约 task 级落地 / MED: listener cleanup、test.mjs 完整文件、P0.13 拆分）。v2 的 11 条修正继续有效。详见 spec v4 附录 B。
+**Plan version**: **v4** — 整合 plan v3 review 反馈后的 4 条必修（gemini CRITICAL: Task 1.9 过载拆成 1.9a / 1.9b / codex: P0.5 `-w $MOCK_CWD` 真隔离第一级搜索 / codex: Task 1.9a 加 scanBraces 跨行字符串 + 转义引号回归测试 / codex: Task 1.7 合并重复 Step 6）。v2/v3 的 20 条修正继续有效。三轮 plan review 已收敛明显：v1→v2 修 11 条，v2→v3 修 9 条，v3→v4 修 4 条；两家已一致判断 "停止 review 循环，进执行"。
 
 **Goal:** Build the minimal working skeleton of `minimax-plugin-cc` — a Claude Code plugin wrapping MiniMax-AI/Mini-Agent — sufficient to pass spec acceptance tests **T1** (`/minimax:setup --json` returns full status), **T8** (install flow on a fresh environment), **T12** (YAML write preserves other fields, **using mock config path, never touches user real file**), **T13** (SOCKS auto-recovery). Probe the 11 remaining unknowns from spec §7 (P0.9 已完成 env-auth 结论，本 plan 只文档化).
 
@@ -501,7 +501,8 @@ for SCEN in "${SCENARIOS[@]}"; do
         echo "exit=$?" >> "$FILE"
         ;;
       model)
-        LC_ALL=$LOC HOME=$MOCK_HOME mini-agent -t "hi" -w /tmp >> "$FILE" 2>&1
+        # plan v4 修正：cwd 必须指到 MOCK_CWD（无 mini_agent/config/ 子目录）避开第一级搜索
+        LC_ALL=$LOC HOME=$MOCK_HOME mini-agent -t "hi" -w "$MOCK_CWD" >> "$FILE" 2>&1
         echo "exit=$?" >> "$FILE"
         ;;
       cwd)
@@ -2286,7 +2287,7 @@ fs.rmSync(tmp, { recursive: true });
 console.log("writeMiniAgentApiKey integration test PASSED");
 ```
 
-- [ ] **Step 6: Parse + 跑所有测试**
+- [ ] **Step 6: Parse + 跑所有测试**（plan v4 合并：原先有两个重复 Step 6）
 
 ```bash
 node --check plugins/minimax/scripts/lib/minimax.mjs
@@ -2294,22 +2295,16 @@ node plugins/minimax/scripts/lib/minimax.test.mjs
 node plugins/minimax/scripts/lib/minimax.write.test.mjs
 ```
 
-Expected: 单元测试全绿；write 集成测试打出 `writeMiniAgentApiKey integration test PASSED`。**绝对不要**碰用户真的 `~/.mini-agent/config/config.yaml`。
-
-- [ ] **Step 6: Parse + 跑测试**
-
-```bash
-node --check plugins/minimax/scripts/lib/minimax.mjs
-node plugins/minimax/scripts/lib/minimax.test.mjs
-```
-
-Expected: all green.
+**所有三条命令都必须跑，且都必须绿**：
+- `node --check` 无输出（语法 OK）
+- `minimax.test.mjs` 打印 `N passed, 0 failed`（validateYaml / validateKeyContent / escape / redact 单元测试）
+- `minimax.write.test.mjs` 打印 `writeMiniAgentApiKey integration test PASSED`（mock config path 集成测试；**绝对不碰**用户真 `~/.mini-agent/config/config.yaml`）
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add plugins/minimax/scripts/lib/minimax.mjs plugins/minimax/scripts/lib/minimax.test.mjs plugins/minimax/scripts/lib/minimax.write.test.mjs
-git commit -m "feat(minimax): YAML gate v3 state machine + writeApiKey via withLockAsync (plan v2)"
+git commit -m "feat(minimax): YAML gate v3 state machine + writeApiKey via withLockAsync (plan v4)"
 ```
 
 ---
@@ -2463,13 +2458,17 @@ git commit -m "feat(minimax): spawnWithHardTimeout helper with three-phase timeo
 
 ---
 
-### Task 1.9: `minimax.mjs` — log parser (state machine) + `mini-agent log` fallback + `getMiniAgentAuthStatus` (async)
+### Task 1.9a: `minimax.mjs` — log parser (state machine) + `mini-agent log` fallback + tests
 
 **Files:**
 - Modify: `plugins/minimax/scripts/lib/minimax.mjs`
 - Modify: `plugins/minimax/scripts/lib/minimax.test.mjs`
 
-> **plan v3 合并**：原 Task 1.8 的 `getMiniAgentAuthStatus` 移到此 task——因为 auth 依赖 parser，同 task 内实现避免 "stub 残留 / 漏 await" 两个 codex CRITICAL。实现顺序：extractLogPath → parser → fallback → auth。
+> **plan v4 拆分**（gemini CRITICAL）：原 Task 1.9 同时做 parser + auth + 3 种 smoke test 过载（6 step / ~400 行代码）。v4 拆为：
+> - **1.9a**（本 task）：parser + fallback + unit tests
+> - **1.9b**（下个 task）：getMiniAgentAuthStatus (async) + smoke test
+>
+> 拆分理由：parser 是纯函数、auth 依赖 parser；两者分离后 subagent 每个 task 负担降至 ~250 行，降低截断/漏 await 风险；1.9b 用 1.9a 的 commit 作为 baseline，`parseFinalResponseFromLog` 已定义后才 import 使用，**物理上不可能漏 await**。
 
 - [ ] **Step 1: 追加 `extractLogPathFromStdout` + 状态机 parser + fallback 到 `minimax.mjs`**
 
@@ -2814,6 +2813,53 @@ Timestamp: 2026-04-20 10:44:41
     fs.unlinkSync(p);
   });
 
+  await asyncTest("handles multi-line string spanning lines (scanBraces cross-line state)", async () => {
+    // JSON 合法：真实换行在 JSON 字符串里必须是 `\n` escape；但日志里的 JSON body 可能被打印为多行 pretty-printed
+    // parseLogBlocks 的 scanBraces 必须跨行维护字符串状态
+    const logContent = `Agent Run Log
+
+--------------------------------------------------------------------------------
+[1] RESPONSE
+--------------------------------------------------------------------------------
+
+{
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "line 1 of answer\\nline 2 has a { brace not in string at all\\nline 3 has } too"
+    }
+  ],
+  "stop_reason": "end_turn"
+}
+`;
+    const p = `/tmp/mm-parse-multiline-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, true);
+    assertEqual(r.response.includes("line 3 has }"), true);
+    assertEqual(r.stopReason, "end_turn");
+    fs.unlinkSync(p);
+  });
+
+  await asyncTest("handles escaped quote within string (scanBraces \\\" handling)", async () => {
+    // JSON 字符串内的 \" 不能被 scanBraces 误判为字符串结束
+    const logContent = `Agent Run Log
+
+--------------------------------------------------------------------------------
+[1] RESPONSE
+--------------------------------------------------------------------------------
+
+{"role":"assistant","content":[{"type":"text","text":"He said \\"hello { world }\\" then left"}],"stop_reason":"end_turn"}
+`;
+    const p = `/tmp/mm-parse-escquote-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, true);
+    assertEqual(r.response.includes("hello { world }"), true);
+    fs.unlinkSync(p);
+  });
+
   await asyncTest("returns partial:true when truncated mid-body", async () => {
     const logContent = `Agent Run Log
 
@@ -2858,9 +2904,25 @@ node plugins/minimax/scripts/lib/minimax.write.test.mjs
 
 Expected: all green.
 
-- [ ] **Step 4: 追加 `getMiniAgentAuthStatus` (async) — **在 parser 之后**，保证调用时 parser 已经定义**
+- [ ] **Step 4: Commit Task 1.9a**
 
-在 `minimax.mjs` 追加（注意：Task 1.8 已写 `spawnWithHardTimeout` helper、Task 1.9 Step 1 已写 `extractLogPathFromStdout` 和 `parseFinalResponseFromLog`，现在都可安全引用）：
+```bash
+git add plugins/minimax/scripts/lib/minimax.mjs plugins/minimax/scripts/lib/minimax.test.mjs
+git commit -m "feat(minimax): log state-machine parser + mini-agent log fallback + parser tests (plan v4 Task 1.9a)"
+```
+
+---
+
+### Task 1.9b: `minimax.mjs` — `getMiniAgentAuthStatus` (async)
+
+**Files:**
+- Modify: `plugins/minimax/scripts/lib/minimax.mjs`
+
+> **plan v4 拆出**：本 task 在 1.9a（parser+tests）commit 之后才开始。`parseFinalResponseFromLog` 在 1.9a 已定义且 async——1.9b import/引用时必然 `await`。
+
+- [ ] **Step 1: 追加 `getMiniAgentAuthStatus` (async) — **在 parser 之后**，保证调用时 parser 已经定义**
+
+在 `minimax.mjs` 追加（注意：Task 1.8 已写 `spawnWithHardTimeout` helper、Task 1.9a 已写 `extractLogPathFromStdout` 和 `parseFinalResponseFromLog`，现在都可安全引用）：
 
 ```js
 // ── Auth check (spec §3.6, async + hard timeout) ──────────────
@@ -2931,7 +2993,13 @@ export async function getMiniAgentAuthStatus(cwd) {
 }
 ```
 
-- [ ] **Step 5: Auth smoke test（用假 key，必须不卡、30s 内必返）**
+- [ ] **Step 2: Parse check**
+
+```bash
+node --check plugins/minimax/scripts/lib/minimax.mjs
+```
+
+- [ ] **Step 3: Auth smoke test（用假 key，必须不卡、30s 内必返）**
 
 ```bash
 time node -e '
@@ -2942,13 +3010,13 @@ import("./plugins/minimax/scripts/lib/minimax.mjs").then(async m => {
 '
 ```
 
-Expected: 30s 内必须返回。fake key 下 reason 应是 `llm-call-failed` / `ping-timeout` / `unknown-crashed` 之一；绝不会出现真 key 明文。
+Expected: 30s 内必须返回。fake key 下 reason 应是 `llm-call-failed` / `ping-timeout` / `unknown-crashed` 之一；绝不会出现真 key 明文。若 >35s 未返 → `spawnWithHardTimeout` 硬超时没生效，回 Task 1.8 修。
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit Task 1.9b**
 
 ```bash
-git add plugins/minimax/scripts/lib/minimax.mjs plugins/minimax/scripts/lib/minimax.test.mjs
-git commit -m "feat(minimax): log state-machine parser + mini-agent log fallback + async getMiniAgentAuthStatus (plan v3)"
+git add plugins/minimax/scripts/lib/minimax.mjs
+git commit -m "feat(minimax): async getMiniAgentAuthStatus with three-layer sentinel (plan v4 Task 1.9b)"
 ```
 
 ---
