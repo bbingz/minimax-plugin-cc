@@ -155,3 +155,20 @@ test("releaseQueueSlot: unknown token leaves lock alone (defensive)", async () =
   assert.equal(fs.existsSync(queueLockPath(root)), true, "wrong token must not release");
   releaseQueueSlot(root, slot.token);
 });
+
+test("acquireQueueSlot: two concurrent attempts serialize (FIFO-ish)", async () => {
+  const root = mkWorkspaceRoot();
+  const order = [];
+  const slot1 = await acquireQueueSlot(root, { pollIntervalMs: 30, maxWaitMs: 2000 });
+  assert.ok(slot1.acquired);
+  const pending = acquireQueueSlot(root, { pollIntervalMs: 30, maxWaitMs: 2000 });
+  order.push("slot1-acquired");
+  await new Promise(r => setTimeout(r, 200));
+  order.push("slot1-about-to-release");
+  releaseQueueSlot(root, slot1.token);
+  const slot2 = await pending;
+  order.push("slot2-acquired");
+  assert.ok(slot2.acquired, `slot2 should acquire after release; reason=${slot2.reason}`);
+  assert.deepEqual(order, ["slot1-acquired", "slot1-about-to-release", "slot2-acquired"]);
+  releaseQueueSlot(root, slot2.token);
+});

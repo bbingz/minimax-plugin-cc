@@ -16,6 +16,11 @@ import {
   callMiniAgentReview,
 } from "./lib/minimax.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
+import {
+  defaultWorkspaceRoot,
+  acquireQueueSlot,
+  releaseQueueSlot,
+} from "./lib/job-control.mjs";
 
 const USAGE = `Usage: minimax-companion <subcommand> [options]
 
@@ -188,7 +193,22 @@ async function runAsk(rawArgs) {
     process.stdout.write(stripAnsiSgr(line) + "\n");
   };
 
-  const result = await callMiniAgent({ prompt, cwd, timeout, onProgressLine });
+  // v2 Task 4.0 (C6): route through the P0.10 serial queue so ask/review/rescue
+  // can't race for log-file attribution under seconds-precision timestamps.
+  const workspaceRoot = defaultWorkspaceRoot();
+  const slot = await acquireQueueSlot(workspaceRoot, { maxWaitMs: timeout + 30_000 });
+  if (!slot.acquired) {
+    const payload = { status: "queue-timeout", reason: slot.reason };
+    if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    else process.stderr.write(`Error: queue-timeout (${slot.reason})\n`);
+    process.exit(4);
+  }
+  let result;
+  try {
+    result = await callMiniAgent({ prompt, cwd, timeout, onProgressLine });
+  } finally {
+    releaseQueueSlot(workspaceRoot, slot.token);
+  }
   const cls = classifyMiniAgentResult(result);
 
   const exitCode = STATUS_EXIT_CODE[cls.status] ?? 5;
@@ -335,14 +355,29 @@ async function runReview(rawArgs) {
     process.stderr.write(stripAnsiSgr(line) + "\n");
   };
 
-  const r = await callMiniAgentReview({
-    context: diffResult.diff,
-    focus,
-    schemaPath,
-    cwd,
-    timeout,
-    onProgressLine,
-  });
+  // v2 Task 4.0 (C6): serialize through the shared queue. *2+30s because
+  // callMiniAgentReview may spawn mini-agent twice (first + retry).
+  const workspaceRoot = defaultWorkspaceRoot();
+  const slot = await acquireQueueSlot(workspaceRoot, { maxWaitMs: timeout * 2 + 30_000 });
+  if (!slot.acquired) {
+    const payload = { status: "queue-timeout", reason: slot.reason };
+    if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    else process.stderr.write(`Error: queue-timeout (${slot.reason})\n`);
+    process.exit(4);
+  }
+  let r;
+  try {
+    r = await callMiniAgentReview({
+      context: diffResult.diff,
+      focus,
+      schemaPath,
+      cwd,
+      timeout,
+      onProgressLine,
+    });
+  } finally {
+    releaseQueueSlot(workspaceRoot, slot.token);
+  }
 
   if (r.ok) {
     if (options.json) {
