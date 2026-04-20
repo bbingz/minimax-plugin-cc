@@ -1,108 +1,112 @@
 # Phase 2 smoke — T2 / T3 / T10
 
-Run date: 2026-04-20 18:45 Asia/Shanghai
-Executor: Claude (sonnet subagent)
+Run date: 2026-04-20 19:20 Asia/Shanghai (final pass)
+Executor: Claude sonnet (controller, after initial subagent run BLOCKED on env)
 Mini-Agent: mini-agent 0.1.0
 Node: v25.9.0
-Plugin baseline: git tag `phase-1-foundation` + 7 Phase 2 commits (through `cbfaf9a`)
+Plugin baseline: git tag `phase-1-foundation` + 11 Phase 2 commits (through `380fc7e`)
 
-## Environment note
+## Timeline
 
-The task plan stated "Real API key IS configured in ~/.mini-agent/config/config.yaml". On
-execution, the file contains `api_key: "sk-fake-probe-key-not-real"` — a probe-phase
-placeholder left from Phase 0 exploration (never replaced with a real key). All three tests
-were run against this environment as-is; results reflect the actual machine state.
+1. First smoke run (at 18:45) BLOCKED on T2 because `~/.mini-agent/config/config.yaml` still
+   held a Phase 0 probe placeholder key. Documented as such; tag not applied.
+2. User supplied a real Coding Plan key + endpoint + model (`MiniMax-M2.7-highspeed` against
+   `https://api.minimaxi.com/anthropic`).
+3. `write-key` applied the real key atomically. T2 re-run returned `llm-call-failed` because
+   classifier rejected `finish_reason: "end_turn"` (Anthropic-native, not in the OpenAI-only
+   SUCCESS set).
+4. Classifier fix landed as commit `380fc7e` (added `end_turn` to `FINISH_REASON_SUCCESS`,
+   new unit test).
+5. Final T2/T3/T10 rerun (this record) — all three PASS.
 
-## T2 — ask --json "hello" (real key)
+## T2 — ask --json "hello" (real Coding Plan key)
 
 - Command: `node plugins/minimax/scripts/minimax-companion.mjs ask --json "hello"`
-- exit: 4
-- stdout (first 800 chars):
+- exit: 0
+- status: `success`
+- finishReason: `end_turn`
+- response (first 200 chars):
   ```
-  {
-    "status": "llm-call-failed",
-    "reason": null,
-    "detail": null,
-    "logPath": "/Users/bing/.mini-agent/log/agent_run_20260420_184056.log",
-    "diagnostic": {
-      "status": "llm-call-failed",
-      "stderrHeadTail": "Function _make_api_request call 1 failed: Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': \"login fail: Please carry the API secret key in the 'Authorization' field of the request header\"}, 'request_id': '063535ba9f6dec499331c63f569306ef'}, retrying attempt 2 after 1.00 seconds\nFunction _make_api_request call 2 failed: Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': \"login fail: Please carry the API secret key in the 'Authorization' field of the request header\"}, 'request_id': '063535bcb686d9
+  Hello! 👋 I'm Mini-Agent, your AI assistant powered by MiniMax. I'm here to help you with a wide range of tasks, including:
+
+  - **File operations**: Reading, writing, and editing files
+  - **Bash command
   ```
-- status: llm-call-failed
-- Root cause: ~/.mini-agent/config/config.yaml contains placeholder key `sk-fake-probe-key-not-real`
-  which produces HTTP 401 from api.minimax.io. The real key was never configured on this machine.
-- Raw key leak check: CLEAN (key not present in stdout/stderr; output shows masked form only)
-- **Result: BLOCKED — environment prerequisite not met (no real API key configured)**
+- Raw API key leak check: CLEAN (response does not echo any config secrets).
+- **Result: PASS**
 
 ## T3 — ask "讲个笑话" (progress UX)
 
-- Command: (see plan Step 2; first line measured via node wall-clock)
-- exit: 4 (same API key issue as T2 — expected)
-- first_line_ms: 151
-- First 15 lines of transcript:
+- Command: (plan Step 2 boilerplate — first line timed via node wall-clock)
+- exit: 0 (full success path)
+- first_line_ms: **156** (threshold 1500 ms)
+- First 8 lines of transcript:
   ```
-  [151ms] Starting MiniMax (cold start ~3s)...
-  [13127ms] LLM retry mechanism enabled (max 3 retries)
-  [13206ms] Loaded Bash Output tool
-  [13281ms] Loaded Bash Kill tool
-  [13357ms] Loading Claude Skills...
-  [13429ms] Discovered 15 Claude Skills
-  [13500ms] Loaded Skill tool (get_skill)
-  [13569ms] Loading MCP tools...
-  [13641ms]   MCP timeouts: connect=10.0s, execute=60.0s, sse_read=120.0s
-  [13713ms] Skipping disabled server: minimax_search
-  [13785ms] Skipping disabled server: memory
-  [13856ms] 
-  [13927ms] Total MCP tools loaded: 0
-  [13999ms] No available MCP tools found
-  [14069ms]
+  [156ms] Starting MiniMax (cold start ~3s)...
+  [5983ms] ✅ LLM retry mechanism enabled (max 3 retries)
+  [6056ms] ✅ Loaded Bash Output tool
+  [6128ms] ✅ Loaded Bash Kill tool
+  [6202ms] Loading Claude Skills...
+  [6272ms] ✅ Discovered 15 Claude Skills
+  [6345ms] ✅ Loaded Skill tool (get_skill)
+  [6417ms] Loading MCP tools...
   ```
-- UX verdict: first progress banner appeared at 151ms (threshold: 1500ms). The no-blank-screen
-  contract is satisfied regardless of API outcome.
-- **Result: PASS (UX only) — first line within 151ms; API call failed due to same env issue as T2**
+- Tail (footer / verbatim Chinese response preserved):
+  ```
+  [13226ms]
+  [13298ms] ---
+  [13369ms]
+  [13440ms] 希望这些笑话能让你开心一笑！😊
+  [13511ms] (model: MiniMax-M2.7-highspeed · log: /Users/bing/.mini-agent/log/agent_run_20260420_191840.log)
+  ```
+- UX verdict: cold-start banner fires at 156 ms (< 200 ms, user sees "not frozen"); full
+  multi-line Chinese response + emoji preserved verbatim; footer format matches spec.
+- **Result: PASS**
 
 ## T10 — ask --json "hello" (fake key via HOME override)
 
-- Fake HOME: `/var/folders/9f/kky77n4n74sbqytxvgnpvmh80000gn/T/tmp.HPNAOdSQ87`
+- Fake HOME: `$(mktemp -d)` under `/var/folders/...`
 - Fake key: `fake-definitely-not-a-valid-key-abcdef123456`
+- api_base / model in the fake config match the real config (so the only delta is the key)
 - exit: 4
-- status: llm-call-failed
-- stdout:
-  ```json
-  {
-    "status": "llm-call-failed",
-    "reason": null,
-    "detail": null,
-    "logPath": "/var/folders/.../tmp.HPNAOdSQ87/.mini-agent/log/agent_run_20260420_184511.log",
-    "diagnostic": {
-      "status": "llm-call-failed",
-      ...
-    }
-  }
-  ```
-- stderr (first 500 chars): (empty — all output goes to stdout)
-- Raw fake-key leak grep: **clean** — `fake-definitely-not-a-valid-key-abcdef123456` not found in stdout or stderr
+- status: `llm-call-failed`
+- Raw fake-key leak grep: **CLEAN** — fake key bytes absent from stdout and stderr.
 - **Result: PASS**
 
 ## Overall verdict
 
-Phase 2 hard gates: T2 BLOCKED / T3 PASS (UX) / T10 PASS.
+Phase 2 hard gates: **T2 PASS / T3 PASS / T10 PASS**.
 
-Tag `phase-2-ask` NOT applied because T2 hard gate was not met.
+Tag `phase-2-ask` applied on the Task 2.7 commit.
 
-Root blocker: `~/.mini-agent/config/config.yaml` has placeholder key `sk-fake-probe-key-not-real`
-(Phase 0 probe artifact). To unblock T2: replace `api_key` with a real MiniMax API key, then
-re-run Task 2.7.
+## Classifier spec-patch finding
+
+During T2 debug I discovered Mini-Agent's `provider: "anthropic"` path returns
+`finish_reason: "end_turn"` (Anthropic's native value). Spec v5 / P0.2 only sampled the
+OpenAI-compatible endpoint and listed `{stop, length, tool_calls, ...}`. Mini-Agent simply
+passes through whichever value the upstream provider emits — OpenAI endpoints give
+`stop`/`length`/`tool_calls`; Anthropic endpoints give `end_turn`/`max_tokens`/`tool_use`.
+
+The classifier sets now cover both families:
+
+| Set | Values |
+|---|---|
+| `FINISH_REASON_SUCCESS` | `stop`, `stop_sequence`, `end_turn` |
+| `FINISH_REASON_TRUNCATED` | `length`, `max_tokens` |
+| `FINISH_REASON_INCOMPLETE` | `tool_calls`, `tool_use`, `content_filter`, `function_call` |
+
+Fix commit: `380fc7e`. Test `success when finish_reason=end_turn (Anthropic provider)`
+lands alongside.
+
+Upstream Phase 3/4 code paths (review / rescue JSON extraction) inherit the same taxonomy
+through `classifyMiniAgentResult` — no further patches needed.
 
 ## Notes
 
-- T2 BLOCKED is an environment issue, NOT a code defect. The classify/emit pipeline worked
-  correctly: 401 -> stderrHeadTail capture -> classifyMiniAgentResult=llm-call-failed -> JSON
-  emitted with exit 4.
-- T3 confirmed the T3 UX contract: first line appeared within 151ms of subprocess start,
-  well under the 1500ms threshold. The cold-start banner fires before the LLM call.
-- T10's fake key produced llm-call-failed (HTTP 401), confirming fake keys do NOT surface as
-  success. Raw fake-key bytes did not leak. This result is consistent with T2.
-- The user's real `~/.mini-agent/config/config.yaml` was never written to during these tests
-  (T10 used HOME override; T2/T3 only read it).
-- Code pipeline is end-to-end correct. Phase 2 implementation is complete pending API key setup.
+- Real API key was applied via `write-key` (atomic, goes through the hardened YAML gate).
+- Config changes `api_base` and `model` for Coding Plan endpoint were made via direct Edit
+  (plugin runtime only ever writes `api_key`; `api_base` / `model` are user-space config).
+- No secrets appear in this document or in CHANGELOG; `redactSecrets` additionally covers
+  `sk-...` and `eyJ...` prefixes if any future leak path emerges.
+- Measured cold-start-to-LLM-response total for T3: ~13.5 s (includes skill/MCP load).
+  Under 15 s comfortably; well within the spec's cold-start budget.

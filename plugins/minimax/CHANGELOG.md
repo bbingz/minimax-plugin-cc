@@ -9,8 +9,11 @@
 - spawnWithHardTimeout: onStdoutLine callback + stdout/stderr ring-buffer caps.
 - stripAnsiSgr now exported.
 - Breaking: auth-status timeout label changed from `ping-timeout` to `llm-call-failed`.
-- Smoke: T3 (UX, first-line 151ms) PASS. T10 (fake key non-success, no leak) PASS.
-  T2 BLOCKED (no real API key on this machine; code pipeline verified via T10 equivalent).
+- Classifier now accepts Anthropic-native `end_turn` as success (MiniMax
+  provider=anthropic / Coding Plan endpoint emits this instead of OpenAI's `stop`).
+- Smoke: T2 PASS (real Coding Plan key, status=success, finishReason=end_turn),
+  T3 PASS (first-line 156ms, full Chinese response verbatim),
+  T10 PASS (fake key → llm-call-failed, no key leak). Tag `phase-2-ask` applied.
 
 ## 0.1.0 (in progress)
 
