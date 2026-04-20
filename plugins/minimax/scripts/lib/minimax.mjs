@@ -387,3 +387,217 @@ export function spawnWithHardTimeout(bin, args, options = {}) {
     }, timeoutMs);
   });
 }
+
+// ── Log path extraction & response parsing (spec §3.5, state machine; P0.2 schema) ─
+
+export function extractLogPathFromStdout(stdoutOrFirstLines) {
+  const lines = Array.isArray(stdoutOrFirstLines)
+    ? stdoutOrFirstLines
+    : stdoutOrFirstLines.split("\n").slice(0, 30);
+  for (const line of lines) {
+    const clean = line.replace(/\x1b\[[0-9;]*m/g, "");
+    const m = clean.match(/Log file:\s+(\S+\.log)/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/**
+ * Count unescaped { and } on a line, respecting JSON string context.
+ */
+function scanBraces(line, startInString) {
+  let opens = 0, closes = 0;
+  let inString = startInString;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inString) {
+      if (c === "\\") { i++; continue; }  // skip escaped
+      if (c === '"') inString = false;
+    } else {
+      if (c === '"') inString = true;
+      else if (c === "{") opens++;
+      else if (c === "}") closes++;
+    }
+  }
+  return { opens, closes, endsInString: inString };
+}
+
+/**
+ * Parse Mini-Agent log into blocks using a line-by-line state machine.
+ * Returns array of { n, kind: "REQUEST"|"RESPONSE"|"TOOL_RESULT", json, raw, truncated? }.
+ */
+function parseLogBlocks(text) {
+  const STATE = { SEEK_HEADER: 0, SKIP_TO_BODY: 1, COLLECT_BODY: 2 };
+  let state = STATE.SEEK_HEADER;
+  const blocks = [];
+  let current = null;
+  let accLines = [];
+  let braceDepth = 0;
+  let inString = false;
+
+  const lines = text.split(/\r?\n/);
+
+  const finishBlock = (truncated) => {
+    if (!current) return;
+    current.raw = accLines.join("\n");
+    try { current.json = JSON.parse(current.raw); }
+    catch { current.json = null; }
+    if (truncated) current.truncated = true;
+    blocks.push(current);
+    current = null;
+    accLines = [];
+    braceDepth = 0;
+    inString = false;
+  };
+
+  for (const line of lines) {
+    if (state === STATE.SEEK_HEADER) {
+      const m = line.match(/^\[(\d+)\]\s+(REQUEST|RESPONSE|TOOL_RESULT)$/);
+      if (m) {
+        current = { n: parseInt(m[1], 10), kind: m[2] };
+        state = STATE.SKIP_TO_BODY;
+      }
+      continue;
+    }
+    if (state === STATE.SKIP_TO_BODY) {
+      const trimmed = line.trimStart();
+      if (trimmed.startsWith("{")) {
+        accLines = [line];
+        const r = scanBraces(line, false);
+        braceDepth = r.opens - r.closes;
+        inString = r.endsInString;
+        if (braceDepth <= 0 && !inString) {
+          finishBlock(false);
+          state = STATE.SEEK_HEADER;
+        } else {
+          state = STATE.COLLECT_BODY;
+        }
+      }
+      continue;
+    }
+    if (state === STATE.COLLECT_BODY) {
+      accLines.push(line);
+      const r = scanBraces(line, inString);
+      braceDepth += r.opens - r.closes;
+      inString = r.endsInString;
+      if (braceDepth <= 0 && !inString) {
+        finishBlock(false);
+        state = STATE.SEEK_HEADER;
+      }
+    }
+  }
+  if (state === STATE.COLLECT_BODY && current) finishBlock(true);
+
+  return blocks;
+}
+
+// P0.2 实测：Mini-Agent 日志用 OpenAI 兼容格式（非 Anthropic 原始）
+const TERMINAL_FINISH_REASONS = new Set([
+  "stop", "stop_sequence", "length", "tool_calls", "tool_use", "content_filter", "max_tokens"
+]);
+
+function pickTerminalResponse(blocks) {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if (!b.json) continue;
+    const hasFinishReason = typeof b.json.finish_reason === "string"
+      && TERMINAL_FINISH_REASONS.has(b.json.finish_reason);
+    const hasNonEmptyContent = typeof b.json.content === "string" && b.json.content.length > 0;
+    if (hasFinishReason || hasNonEmptyContent) return b;
+  }
+  return null;
+}
+
+function extractToolCalls(responseJson) {
+  // P0.2: tool_calls 是顶层字段（OpenAI 格式 [{id, name, arguments}]）
+  const arr = Array.isArray(responseJson?.tool_calls) ? responseJson.tool_calls : [];
+  return arr.map(c => ({ id: c.id, name: c.name, arguments: c.arguments }));
+}
+
+function extractTextResponse(responseJson) {
+  // P0.2: content 是字符串
+  return typeof responseJson?.content === "string" ? responseJson.content : "";
+}
+
+function extractThinking(responseJson) {
+  return typeof responseJson?.thinking === "string" ? responseJson.thinking : null;
+}
+
+/**
+ * Parse the final assistant response from a Mini-Agent log file.
+ * Uses state machine (spec §3.5 + P0.2 schema). On main-path failure,
+ * tries `mini-agent log <file>` fallback in isolated try/catch —
+ * fallback failure must NOT affect main-path result.
+ */
+export async function parseFinalResponseFromLog(logPath) {
+  let text;
+  try { text = fs.readFileSync(logPath, "utf8"); }
+  catch (err) {
+    return { ok: false, partial: true, reason: `read-failed: ${err.code || err.message}`, response: "", toolCalls: [] };
+  }
+
+  const blocks = parseLogBlocks(text);
+  const responseBlocks = blocks.filter(b => b.kind === "RESPONSE");
+
+  if (responseBlocks.length === 0) {
+    const fb = await tryMiniAgentLogFallback(logPath);
+    return {
+      ok: false,
+      partial: true,
+      reason: "no-response-block",
+      response: "",
+      toolCalls: [],
+      fallbackUsed: fb.used,
+      fallbackOk: fb.ok,
+    };
+  }
+
+  const picked = pickTerminalResponse(responseBlocks);
+  if (picked) {
+    return {
+      ok: true,
+      partial: false,
+      response: extractTextResponse(picked.json),
+      toolCalls: extractToolCalls(picked.json),
+      thinking: extractThinking(picked.json),
+      finishReason: picked.json.finish_reason || null,
+      blockIndex: picked.n,
+    };
+  }
+
+  const fb = await tryMiniAgentLogFallback(logPath);
+  const lastBlock = responseBlocks[responseBlocks.length - 1];
+  return {
+    ok: false,
+    partial: true,
+    reason: "no-terminal-block",
+    response: "",
+    toolCalls: [],
+    lastPartialResponseRaw: lastBlock?.raw ?? null,
+    fallbackUsed: fb.used,
+    fallbackOk: fb.ok,
+    fallbackResponse: fb.parsedResponse,
+  };
+}
+
+/**
+ * Best-effort fallback — failures NEVER propagate to main path.
+ */
+async function tryMiniAgentLogFallback(logPath) {
+  try {
+    const basename = path.basename(logPath);
+    const result = await spawnWithHardTimeout(MINI_AGENT_BIN, ["log", basename], { timeoutMs: 10_000 });
+    if (result.spawnError || result.timedOut) return { used: true, ok: false };
+    const blocks = parseLogBlocks(result.stdout || "");
+    const responseBlocks = blocks.filter(b => b.kind === "RESPONSE");
+    const picked = pickTerminalResponse(responseBlocks);
+    if (!picked) return { used: true, ok: false };
+    return {
+      used: true,
+      ok: true,
+      parsedResponse: extractTextResponse(picked.json),
+    };
+  } catch {
+    return { used: true, ok: false };
+  }
+}

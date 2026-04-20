@@ -6,11 +6,17 @@ import {
   validateKeyContent,
   escapeForYamlDoubleQuoted,
   redactSecrets,
+  extractLogPathFromStdout,
+  parseFinalResponseFromLog,
 } from "./minimax.mjs";
 
 let passed = 0, failed = 0;
 function test(name, fn) {
   try { fn(); console.log(`  ✓ ${name}`); passed++; }
+  catch (e) { console.error(`  ✗ ${name}`); console.error(`    ${e.message}`); failed++; }
+}
+async function asyncTest(name, fn) {
+  try { await fn(); console.log(`  ✓ ${name}`); passed++; }
   catch (e) { console.error(`  ✗ ${name}`); console.error(`    ${e.message}`); failed++; }
 }
 function assertEqual(a, b, msg) {
@@ -197,5 +203,194 @@ test("redacts sk- keys", () => {
   assertEqual(redactSecrets("Here is sk-abcdefghij0123456789 extra"), "Here is sk-***REDACTED*** extra");
 });
 
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed > 0 ? 1 : 0);
+(async () => {
+  console.log("# extractLogPathFromStdout");
+
+  test("extracts plain log line", () => {
+    const s = "Loading...\n📝 Log file: /Users/x/.mini-agent/log/agent_run_20260420_104430.log\nMore";
+    assertEqual(extractLogPathFromStdout(s), "/Users/x/.mini-agent/log/agent_run_20260420_104430.log");
+  });
+
+  test("extracts ANSI-wrapped log line", () => {
+    const s = "\x1b[2m📝 Log file: /tmp/agent_run_test.log\x1b[0m";
+    assertEqual(extractLogPathFromStdout(s), "/tmp/agent_run_test.log");
+  });
+
+  test("returns null if absent", () => {
+    assertEqual(extractLogPathFromStdout("No log here"), null);
+  });
+
+  console.log("# parseFinalResponseFromLog (state machine + OpenAI schema)");
+  const fs = await import("node:fs");
+
+  await asyncTest("parses single-block terminal RESPONSE (OpenAI compat shape)", async () => {
+    const logContent = `Agent Run Log
+================================================================================
+
+--------------------------------------------------------------------------------
+[1] REQUEST
+Timestamp: 2026-04-20 10:44:37
+--------------------------------------------------------------------------------
+
+{"messages":[{"role":"user","content":"hi"}]}
+
+
+--------------------------------------------------------------------------------
+[2] RESPONSE
+Timestamp: 2026-04-20 10:44:41
+--------------------------------------------------------------------------------
+
+{"content":"Hello!","finish_reason":"stop"}
+`;
+    const p = `/tmp/mm-parse-test-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, true);
+    assertEqual(r.response, "Hello!");
+    assertEqual(r.finishReason, "stop");
+    assertEqual(r.blockIndex, 2);
+    fs.unlinkSync(p);
+  });
+
+  await asyncTest("picks LAST terminal RESPONSE in multi-block log (tool_calls 中间 + stop 末尾)", async () => {
+    const logContent = `Agent Run Log
+================================================================================
+
+--------------------------------------------------------------------------------
+[1] REQUEST
+--------------------------------------------------------------------------------
+
+{"messages":[]}
+
+--------------------------------------------------------------------------------
+[2] RESPONSE
+--------------------------------------------------------------------------------
+
+{"content":"","tool_calls":[{"id":"t1","name":"bash","arguments":{"command":"ls"}}],"finish_reason":"tool_calls"}
+
+
+--------------------------------------------------------------------------------
+[3] TOOL_RESULT
+--------------------------------------------------------------------------------
+
+{"output":"file1\\nfile2"}
+
+
+--------------------------------------------------------------------------------
+[4] REQUEST
+--------------------------------------------------------------------------------
+
+{"messages":[]}
+
+--------------------------------------------------------------------------------
+[5] RESPONSE
+--------------------------------------------------------------------------------
+
+{"content":"Done.","finish_reason":"stop"}
+`;
+    const p = `/tmp/mm-parse-multi-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, true);
+    assertEqual(r.response, "Done.");
+    assertEqual(r.blockIndex, 5);
+    assertEqual(r.finishReason, "stop");
+    fs.unlinkSync(p);
+  });
+
+  await asyncTest("extracts tool_calls from top-level field (OpenAI shape)", async () => {
+    const logContent = `Agent Run Log
+
+--------------------------------------------------------------------------------
+[1] RESPONSE
+--------------------------------------------------------------------------------
+
+{"content":"","tool_calls":[{"id":"t1","name":"read_file","arguments":{"path":"/tmp/foo"}}],"finish_reason":"tool_calls"}
+`;
+    const p = `/tmp/mm-parse-tc-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, true);
+    assertEqual(Array.isArray(r.toolCalls) && r.toolCalls.length, 1);
+    assertEqual(r.toolCalls[0].name, "read_file");
+    assertEqual(r.toolCalls[0].arguments.path, "/tmp/foo");
+    fs.unlinkSync(p);
+  });
+
+  await asyncTest("handles JSON with { } inside string content", async () => {
+    const logContent = `Agent Run Log
+
+--------------------------------------------------------------------------------
+[1] RESPONSE
+--------------------------------------------------------------------------------
+
+{"content":"The symbol is { or }.","finish_reason":"stop"}
+`;
+    const p = `/tmp/mm-parse-strings-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, true);
+    assertEqual(r.response, "The symbol is { or }.");
+    fs.unlinkSync(p);
+  });
+
+  await asyncTest("handles multi-line pretty-printed JSON (scanBraces cross-line)", async () => {
+    const logContent = `Agent Run Log
+
+--------------------------------------------------------------------------------
+[1] RESPONSE
+--------------------------------------------------------------------------------
+
+{
+  "content": "line 1 of answer\\nline 2 has a { brace not in string at all\\nline 3 has } too",
+  "finish_reason": "stop"
+}
+`;
+    const p = `/tmp/mm-parse-multiline-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, true);
+    assertEqual(r.response.includes("line 3 has }"), true);
+    assertEqual(r.finishReason, "stop");
+    fs.unlinkSync(p);
+  });
+
+  await asyncTest("handles escaped quote within string (scanBraces \\\" handling)", async () => {
+    const logContent = `Agent Run Log
+
+--------------------------------------------------------------------------------
+[1] RESPONSE
+--------------------------------------------------------------------------------
+
+{"content":"He said \\"hello { world }\\" then left","finish_reason":"stop"}
+`;
+    const p = `/tmp/mm-parse-escquote-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, true);
+    assertEqual(r.response.includes("hello { world }"), true);
+    fs.unlinkSync(p);
+  });
+
+  await asyncTest("401 scenario (no RESPONSE block) returns partial:true", async () => {
+    const logContent = `Agent Run Log
+================================================================================
+
+--------------------------------------------------------------------------------
+[1] REQUEST
+--------------------------------------------------------------------------------
+
+{"messages":[{"role":"user","content":"hi"}]}
+`;
+    const p = `/tmp/mm-parse-401-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, false);
+    assertEqual(r.partial, true);
+    assertEqual(r.reason, "no-response-block");
+    fs.unlinkSync(p);
+  });
+
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exit(failed > 0 ? 1 : 0);
+})();
