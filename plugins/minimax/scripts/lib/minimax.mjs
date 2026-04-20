@@ -601,3 +601,70 @@ async function tryMiniAgentLogFallback(logPath) {
     return { used: true, ok: false };
   }
 }
+
+// ── Auth check (spec §3.6, async + hard timeout, P0.2 schema) ──
+
+const CONFIG_NOT_CONFIGURED_PATTERN = /Please configure a valid API Key/;
+const CONFIG_NOT_FOUND_PATTERN = /Configuration file not found/;
+const SOCKS_IMPORT_ERROR_PATTERN = /ImportError: Using SOCKS proxy/;
+
+function stripAnsiSgr(s) {
+  return String(s).replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+export async function getMiniAgentAuthStatus(cwd) {
+  const cfg = readMiniAgentConfig();
+  if (cfg.readError === "config-missing") {
+    return { loggedIn: false, reason: "config-missing", detail: "config.yaml not found at " + MINI_AGENT_CONFIG_PATH };
+  }
+  if (!cfg.api_key || cfg.api_key === "YOUR_API_KEY_HERE") {
+    return { loggedIn: false, reason: "auth-not-configured", detail: "api_key is placeholder or empty" };
+  }
+
+  const result = await spawnWithHardTimeout(
+    MINI_AGENT_BIN,
+    ["-t", "ping", "-w", cwd || process.cwd()],
+    { timeoutMs: AUTH_CHECK_TIMEOUT_MS }
+  );
+
+  if (result.spawnError) {
+    if (result.spawnError.code === "ENOENT") {
+      return { loggedIn: false, reason: "not-installed", detail: `${MINI_AGENT_BIN} not found` };
+    }
+    return { loggedIn: false, reason: "spawn-failed", detail: redactSecrets(result.spawnError.message) };
+  }
+  if (result.timedOut) {
+    return { loggedIn: false, reason: "ping-timeout", detail: `no response within ${AUTH_CHECK_TIMEOUT_MS}ms` };
+  }
+
+  const stdout = stripAnsiSgr(result.stdout);
+  const stderr = stripAnsiSgr(result.stderr);
+  const combined = stderr + "\n" + stdout;
+
+  // Layer 1: 源码常量（稳定跨 locale）
+  if (SOCKS_IMPORT_ERROR_PATTERN.test(combined)) {
+    return { loggedIn: false, reason: "needs-socksio", detail: "httpx 缺 socksio extra；运行 uv tool install --force --with socksio git+..." };
+  }
+  if (CONFIG_NOT_CONFIGURED_PATTERN.test(combined)) {
+    return { loggedIn: false, reason: "auth-not-configured", detail: "Mini-Agent ValueError: invalid API key" };
+  }
+  if (CONFIG_NOT_FOUND_PATTERN.test(combined)) {
+    return { loggedIn: false, reason: "config-missing", detail: "Mini-Agent FileNotFoundError" };
+  }
+
+  // Layer 2: 日志文件（主判定）——P0.2 修订：finish_reason === "stop"
+  const logPath = extractLogPathFromStdout(stdout);
+  if (logPath) {
+    const parsed = await parseFinalResponseFromLog(logPath);
+    if (parsed.ok && parsed.response && parsed.finishReason === "stop") {
+      return { loggedIn: true, model: cfg.model || null, apiBase: cfg.api_base || null };
+    }
+  }
+
+  // Layer 3: stdout sentinel（strip ANSI 后）
+  if (/❌\s*Retry failed/.test(stdout) || /LLM call failed after/.test(stdout) || /401[^0-9].*authentication_error/.test(stdout)) {
+    return { loggedIn: false, reason: "llm-call-failed", detail: redactSecrets(stdout.split("\n").filter(l => /error|failed/i.test(l)).slice(-3).join(" | ")) };
+  }
+
+  return { loggedIn: false, reason: "unknown-crashed", detail: redactSecrets((stderr || stdout).slice(-200)) };
+}
