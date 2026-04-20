@@ -1,4 +1,11 @@
 
+## 2026-04-20 18:45 [Claude sonnet executor] — Phase 2 complete (T2 blocked: no real API key)
+
+- **status**: done (code complete; T2 hard gate blocked by env — see note)
+- **scope**: Phase 2 — /minimax:ask + callMiniAgent + classifyMiniAgentResult (spec §4.1 three-layer sentinel) + minimax-result-handling skill v0.1 + /minimax:ask command.md.
+- **summary**: spawnWithHardTimeout extended with onStdoutLine + ring-buffer cap (Task 2.1); callMiniAgent with Log file capture + snapshot-diff fallback (Task 2.2); classifyMiniAgentResult unifies the three-layer sentinel — ALSO refactors getMiniAgentAuthStatus to reuse it (Task 2.3, BREAKING: old `reason:"ping-timeout"` now returns `reason:"llm-call-failed"` at the outer API; inner classify result carries `reason:"hard-timeout"`); ask subcommand with immediate T3 banner, stripAnsiSgr exported to avoid duplicate (Task 2.4); /minimax:ask command.md with status->opener map (Task 2.5); minimax-result-handling SKILL.md + references/ask-render.md with suspicious-bash tripwire (Task 2.6). T3 (progress UX, first line 151ms) PASS. T10 (fake key non-success, no leak) PASS. T2 BLOCKED: ~/.mini-agent/config/config.yaml has Phase 0 probe placeholder `sk-fake-probe-key-not-real`; real API key not configured on this machine. Tag phase-2-ask NOT applied — see doc/smoke/phase-2-T2-T3-T10.md.
+- **next**: To unblock T2: set a real MiniMax API key via `minimax-companion.mjs write-key --api-key <real-key>`, then re-run Task 2.7. Phase 3 plan (/minimax:review + schema + 1-shot JSON retry + diagnostic bundle). Phase 4 author MUST serialize job-control (P0.10 warning still active).
+
 ## 2026-04-20 16:57 [Claude Sonnet 4.6 executor] — Phase 0+1 complete
 
 - **status**: done

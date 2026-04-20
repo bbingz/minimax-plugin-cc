@@ -1,5 +1,17 @@
 # minimax plugin CHANGELOG
 
+## 2026-04-20 — Phase 2
+
+- Add /minimax:ask command.
+- Add callMiniAgent (one-shot spawn + log parse + progress streaming).
+- Add classifyMiniAgentResult (three-layer sentinel). Refactor getMiniAgentAuthStatus to reuse it.
+- Add minimax-result-handling skill v0.1 (ask-render reference).
+- spawnWithHardTimeout: onStdoutLine callback + stdout/stderr ring-buffer caps.
+- stripAnsiSgr now exported.
+- Breaking: auth-status timeout label changed from `ping-timeout` to `llm-call-failed`.
+- Smoke: T3 (UX, first-line 151ms) PASS. T10 (fake key non-success, no leak) PASS.
+  T2 BLOCKED (no real API key on this machine; code pipeline verified via T10 equivalent).
+
 ## 0.1.0 (in progress)
 
 - Initial scaffold (Phase 1 Task 1.1-1.2)
