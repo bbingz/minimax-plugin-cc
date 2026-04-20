@@ -166,6 +166,17 @@ test("classifyMiniAgentResult: success when finish_reason=stop + non-empty conte
   assert.equal(r.response, "hi");
 });
 
+test("classifyMiniAgentResult: success when finish_reason=end_turn (Anthropic provider)", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "", rawStderr: "", exitCode: 0, signal: null, spawnError: null, timedOut: false,
+    logPath: "/tmp/x.log",
+    logParse: { ok: true, partial: false, response: "Hello!", toolCalls: [], thinking: "greeting", finishReason: "end_turn" },
+  });
+  assert.equal(r.status, "success");
+  assert.equal(r.response, "Hello!");
+  assert.equal(r.finishReason, "end_turn");
+});
+
 test("classifyMiniAgentResult: success-but-truncated when finish_reason=length", () => {
   const r = classifyMiniAgentResult({
     rawStdout: "", rawStderr: "", exitCode: 0, signal: null, spawnError: null, timedOut: false,

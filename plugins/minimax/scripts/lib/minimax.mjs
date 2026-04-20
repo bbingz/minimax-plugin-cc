@@ -784,7 +784,11 @@ export function stripAnsiSgr(s) {
 
 // ── classifyMiniAgentResult (spec §4.1 three-layer sentinel) ────────────────
 
-const FINISH_REASON_SUCCESS = new Set(["stop", "stop_sequence"]);
+// Accept both OpenAI-style values (stop/stop_sequence/length/tool_calls) and
+// Anthropic-native values (end_turn/max_tokens/tool_use). Mini-Agent passes
+// through whichever the upstream provider emits; with provider="anthropic" on
+// api.minimaxi.com/anthropic we see `end_turn`.
+const FINISH_REASON_SUCCESS = new Set(["stop", "stop_sequence", "end_turn"]);
 const FINISH_REASON_TRUNCATED = new Set(["length", "max_tokens"]);
 const FINISH_REASON_INCOMPLETE = new Set(["tool_calls", "tool_use", "content_filter", "function_call"]);
 
