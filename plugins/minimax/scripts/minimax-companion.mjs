@@ -360,7 +360,7 @@ async function runReview(rawArgs) {
       }, null, 2) + "\n");
     } else {
       const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 };
-      const findings = [...r.findings].sort((a, b) => sevOrder[a.severity] - sevOrder[b.severity]);
+      const findings = [...r.findings].sort((a, b) => (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99));
       process.stdout.write(`\nVerdict: ${r.verdict}\n`);
       process.stdout.write(`Summary: ${r.summary}\n`);
       if (findings.length === 0) {
