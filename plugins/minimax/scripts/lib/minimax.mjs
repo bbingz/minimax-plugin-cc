@@ -279,3 +279,111 @@ export async function writeMiniAgentApiKey(newKey) {
   _invalidateConfigCache();
   return { ok: true, lineNumber: gate.lineNumber, form: "D" };
 }
+
+// ── spawn with hard timeout (spec §3.6, plan v5) ──────────────
+//
+// 三段式 timeout 保证：即便子进程吞 SIGTERM，Promise 也必在 timeoutMs + 5s + 500ms 内 resolve
+//
+// 流程:
+//   timeoutMs 到 → SIGTERM
+//   +5s → SIGKILL
+//   +500ms → 强制 resolve（even if close 未触发）
+//
+// stdout/stderr 用 StringDecoder 增量消费；error/exit/close 事件分离
+// 移除所有 listener 防泄漏（plan v3 codex MED）
+
+/**
+ * @param {string} bin
+ * @param {string[]} args
+ * @param {{timeoutMs?: number, cwd?: string, env?: object}} options
+ * @returns {Promise<{exitCode: number|null, signal: string|null, stdout: string, stderr: string, timedOut: boolean, spawnError: Error|null}>}
+ */
+export function spawnWithHardTimeout(bin, args, options = {}) {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, cwd, env } = options;
+
+  return new Promise((resolve) => {
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    let settled = false;
+    let didTimeout = false;
+    let termTimer, killTimer;
+
+    const finalize = (extras) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(termTimer);
+      clearTimeout(killTimer);
+      resolve({
+        exitCode: proc.exitCode ?? null,
+        signal: proc.signalCode ?? null,
+        stdout: stdoutBuf,
+        stderr: stderrBuf,
+        timedOut: didTimeout,
+        spawnError: null,
+        ...extras,
+      });
+    };
+
+    let proc;
+    try {
+      proc = spawn(bin, args, {
+        cwd, env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (spawnError) {
+      settled = true;
+      clearTimeout(termTimer);
+      clearTimeout(killTimer);
+      return resolve({
+        exitCode: null, signal: null, stdout: "", stderr: "",
+        timedOut: false, spawnError,
+      });
+    }
+
+    proc.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(termTimer);
+      clearTimeout(killTimer);
+      proc.stdout?.removeAllListeners();
+      proc.stderr?.removeAllListeners();
+      proc.removeAllListeners("close");
+      resolve({ exitCode: null, signal: null, stdout: stdoutBuf, stderr: stderrBuf, timedOut: false, spawnError: err });
+    });
+
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+
+    proc.stdout.on("data", (chunk) => { stdoutBuf += stdoutDecoder.write(chunk); });
+    proc.stderr.on("data", (chunk) => { stderrBuf += stderrDecoder.write(chunk); });
+
+    proc.once("close", () => {
+      stdoutBuf += stdoutDecoder.end();
+      stderrBuf += stderrDecoder.end();
+      finalize({});
+    });
+
+    // 硬超时三段式
+    termTimer = setTimeout(() => {
+      if (settled) return;
+      didTimeout = true;
+      try { proc.kill("SIGTERM"); } catch {}
+      killTimer = setTimeout(() => {
+        if (settled) return;
+        try { proc.kill("SIGKILL"); } catch {}
+        // 最终兜底：500ms 后若 close 仍未触发，强制 resolve
+        setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(termTimer); clearTimeout(killTimer);
+            resolve({
+              exitCode: null, signal: "SIGKILL",
+              stdout: stdoutBuf, stderr: stderrBuf,
+              timedOut: true, spawnError: null,
+            });
+          }
+        }, 500);
+      }, 5_000);
+    }, timeoutMs);
+  });
+}
