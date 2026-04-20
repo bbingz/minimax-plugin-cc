@@ -102,3 +102,26 @@ test("validateReviewOutput: nested finding.severity enum violation (v2 - Codex #
   assert.equal(r.ok, false);
   assert.ok(r.errors.some(e => /severity/.test(e) && /enum/.test(e)));
 });
+
+test("validateReviewOutput: null input reports 'got null' not 'got object' (code-review I-1)", () => {
+  const r = validateReviewOutput(null, SCHEMA_PATH);
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some(e => /got null/.test(e)), `expected 'got null' in errors; got: ${JSON.stringify(r.errors)}`);
+});
+
+test("validateReviewOutput: undefined input reports 'got undefined' (code-review M-1)", () => {
+  const r = validateReviewOutput(undefined, SCHEMA_PATH);
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some(e => /got undefined/.test(e)));
+});
+
+test("validateReviewOutput: nested error path uses findings[0].X not findings.[0].X (code-review I-2)", () => {
+  const o = validOutput();
+  o.findings[0].confidence = 1.5;
+  const r = validateReviewOutput(o, SCHEMA_PATH);
+  assert.equal(r.ok, false);
+  const hit = r.errors.find(e => /confidence/.test(e));
+  assert.ok(hit, `no confidence error: ${JSON.stringify(r.errors)}`);
+  assert.ok(hit.includes("findings[0].confidence"), `expected 'findings[0].confidence' in path; got: ${hit}`);
+  assert.ok(!hit.includes("findings.[0]"), `legacy dotted-bracket path leaked: ${hit}`);
+});

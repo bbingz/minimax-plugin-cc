@@ -957,10 +957,12 @@ export async function getMiniAgentAuthStatus(cwd) {
 let _schemaCache = new Map();
 
 function loadSchema(schemaPath) {
-  if (_schemaCache.has(schemaPath)) return _schemaCache.get(schemaPath);
-  const text = fs.readFileSync(schemaPath, "utf8");
+  // Normalize so relative vs absolute callers share a cache entry (code-review M-2).
+  const key = path.resolve(schemaPath);
+  if (_schemaCache.has(key)) return _schemaCache.get(key);
+  const text = fs.readFileSync(key, "utf8");
   const schema = JSON.parse(text);
-  _schemaCache.set(schemaPath, schema);
+  _schemaCache.set(key, schema);
   return schema;
 }
 
@@ -977,12 +979,30 @@ function typeMatches(value, expected) {
   return false;
 }
 
+// code-review I-1: distinguish null from object in error messages
+function typeName(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+// code-review I-2: join without dropping `[N]` into `.[N]`
+function formatPath(pathParts) {
+  if (pathParts.length === 0) return "(root)";
+  let out = "";
+  for (const p of pathParts) {
+    if (p.startsWith("[")) out += p;
+    else out += out === "" ? p : "." + p;
+  }
+  return out;
+}
+
 function validateNode(value, node, pathParts, errors) {
-  const pathStr = pathParts.length === 0 ? "(root)" : pathParts.join(".");
+  const pathStr = formatPath(pathParts);
 
   if (node.type) {
     if (!typeMatches(value, node.type)) {
-      errors.push(`${pathStr}: type expected ${node.type}, got ${Array.isArray(value) ? "array" : typeof value}`);
+      errors.push(`${pathStr}: type expected ${node.type}, got ${typeName(value)}`);
       return;
     }
   }
