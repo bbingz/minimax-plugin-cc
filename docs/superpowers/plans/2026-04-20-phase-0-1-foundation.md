@@ -69,9 +69,17 @@
 - `doc/probe/11-mini-agent-log-subcommand.md`
 - `doc/probe/12-yaml-antipatterns.md`
 
-**Already exists:**
-- `docs/superpowers/specs/2026-04-20-minimax-plugin-cc-design.md` (v3)
-- `~/.mini-agent/config/config.yaml` (brainstorm 阶段创建，有真/假 key 供 probe 使用)
+**Already exists（baseline committed at repo init）：**
+- `.gitignore`（极简版，plan v3 前已创建；Task 1.1 会扩充）
+- `docs/superpowers/specs/2026-04-20-minimax-plugin-cc-design.md` (v4)
+- `docs/superpowers/plans/2026-04-20-phase-0-1-foundation.md` (本 plan v3)
+- git repo 已初始化，main 分支，baseline commit `docs: spec v4 + plan v3 baseline`
+- `~/.mini-agent/config/config.yaml` (brainstorm 阶段创建，含 fake key 供 probe 使用)
+
+**Before Phase 0 starts**：
+- 所有后续 `git add` / `git commit` 假设 repo 已初始化——**不再需要** `git init`
+- 每个 Phase 0 probe task 和 Phase 1 task 完成后 commit 一次，commit message 用 `probe(P0.N): <summary>` / `feat/chore/fix(<scope>): <summary>` 规范
+- 若 probe 执行中发现硬门失败（P0.1 / P0.2 / P0.10），executor 必须在当前 task 的 Step 末尾**立即** append CHANGELOG 条目（status: blocked）+ `git commit` + 停下告警用户，而不是继续下一个 task
 
 ---
 
@@ -144,10 +152,32 @@ Expected: 5 distinct paths, each matching `~/.mini-agent/log/agent_run_YYYYMMDD_
 
 ```bash
 cd /Users/bing/-Code-/minimax-plugin-cc
-git init 2>/dev/null; true
 git add doc/probe/01-task-mode.md
 git commit -m "probe(P0.1): --task one-shot stability"
 ```
+
+- [ ] **Step 5: 硬门失败契约（spec §8.4）**
+
+**如果 Step 3 的报告显示 "Hard gate verdict: FAIL"**：
+
+```bash
+# 追加 CHANGELOG 条目，然后停下告警用户
+cat >> CHANGELOG.md <<EOF
+
+## $(date +"%Y-%m-%d %H:%M") [executor]
+
+- **status**: blocked
+- **scope**: Phase 0 / P0.1 (--task one-shot stability)
+- **summary**: Hard gate P0.1 failed. Observations in doc/probe/01-task-mode.md. Mini-Agent \`--task\` mode 不稳定或 Log file 行捕获失败 → 按 spec §7 硬门规则，Phase 1 不启。
+- **next**: User decision needed — 1) 升级 Mini-Agent 版本后 re-probe；2) 切 v0.2 的 M2.7 直连 HTTPS 方案（spec 附录 C 路径 3）；3) 调整 spec 放弃 --task 一次性模式的强依赖。
+EOF
+git add CHANGELOG.md
+git commit -m "blocked: P0.1 hard gate failed — see doc/probe/01-task-mode.md"
+echo "❌ P0.1 hard gate FAILED — plan execution stopped. See CHANGELOG.md tail for next steps." >&2
+exit 1
+```
+
+否则（PASS）继续 P0.2。
 
 ---
 
@@ -235,6 +265,28 @@ tail -30 "$LOG2"
 git add doc/probe/02-response-block-structure.md
 git commit -m "probe(P0.2): RESPONSE block structure + terminal-state rule"
 ```
+
+- [ ] **Step 6: 硬门失败契约（spec §8.4）**
+
+**如果 Step 4 的报告显示 "Hard gate verdict: FAIL"**：
+
+```bash
+cat >> CHANGELOG.md <<EOF
+
+## $(date +"%Y-%m-%d %H:%M") [executor]
+
+- **status**: blocked
+- **scope**: Phase 0 / P0.2 (RESPONSE block structure + terminal-state rule)
+- **summary**: Hard gate P0.2 failed. Observations in doc/probe/02-response-block-structure.md. Mini-Agent 日志 RESPONSE block 结构不符 spec §3.5 假设（非 Anthropic message 格式 / 终态选择规则失效 / 分隔符不稳定）→ Phase 1 不启。
+- **next**: User decision needed — 1) 读 doc/probe/02 找具体不符点；2) 调整 spec §3.5 的状态机和终态规则；3) 若日志格式根本不可解析，切 v0.2 的 M2.7 直连方案。
+EOF
+git add CHANGELOG.md
+git commit -m "blocked: P0.2 hard gate failed — see doc/probe/02-response-block-structure.md"
+echo "❌ P0.2 hard gate FAILED — plan execution stopped." >&2
+exit 1
+```
+
+否则继续 P0.3。
 
 ---
 
@@ -859,6 +911,27 @@ git add doc/probe/10-concurrent-spawn-log.md doc/probe/scripts/p10-concurrent-sp
 git commit -m "probe(P0.10): concurrent spawn log attribution"
 ```
 
+- [ ] **Step 5: 条件硬门契约（spec §8.4）**
+
+**如果 Step 3 的报告显示 "条件硬门判定: FAIL"**：不停 plan，但**必须**在执行到 Phase 4 `job-control.mjs` 时采用"串行化 job 调度"fallback（spec §7）。在 CHANGELOG 追加一条 **warning 条目**，让后续 Phase 2/4 的 executor 有明确信号：
+
+```bash
+# 仅当 FAIL 时跑此 step
+cat >> CHANGELOG.md <<EOF
+
+## $(date +"%Y-%m-%d %H:%M") [executor]
+
+- **status**: in-progress
+- **scope**: Phase 0 / P0.10 (concurrent spawn log attribution) — **CONDITIONAL GATE FAILED**
+- **summary**: snapshot-diff + \`Log file:\` 交叉验证在并发场景下不稳定（详见 doc/probe/10-concurrent-spawn-log.md）。Phase 1 继续，但 Phase 4 job-control.mjs 必须采用串行化 job 调度（一次只允许一个 mini-agent 在跑），v0.2 引入上游 job-id 注入后再改造。
+- **next**: 本 Phase 0 其余 probe 继续；Phase 1 骨架不受影响；Phase 4 作者必须读本条目。
+EOF
+git add CHANGELOG.md
+git commit -m "warn(P0.10): conditional gate failed, Phase 4 must use serial job scheduling"
+```
+
+若 PASS 则无此 step。
+
 ---
 
 ### Task P0.11: Probe `mini-agent log <file>` 子命令
@@ -997,12 +1070,37 @@ git commit -m "probe(P0.12): YAML anti-pattern fixtures for gate tests"
 
 ---
 
-### Task P0.13: Consolidate probes into `minimax-cli-runtime` SKILL v0.1
+### Task P0.13: Finalize `minimax-cli-runtime` SKILL (consolidation + final audit)
+
+> **plan v3 重构**（gemini MEDIUM）：原 v2 让 single subagent 一次性读 12 份 probe 报告填 SKILL.md 容易幻觉。v3 改为**增量构建**：
+> - 在 P0.1 Task 创建 SKILL.md 初始骨架（带明确占位符块）
+> - 每个 Phase 0 probe task 在 Commit step 之后、硬门 step 之前加一个 "update SKILL.md" 可选子步骤：只改它自己那节的占位符
+> - P0.13 只做最终核对、风格统一、commit v0.1 tag
+>
+> **本 task（P0.13）是纯 audit**：不生成内容，只验证前面 12 个 probe task 已把各自的 SKILL.md 段落填好。
 
 **Files:**
-- Create: `plugins/minimax/skills/minimax-cli-runtime/SKILL.md`
+- Modify: `plugins/minimax/skills/minimax-cli-runtime/SKILL.md`（前面 probe task 已渐进填写）
 
-- [ ] **Step 1: 写 SKILL.md 初稿（从 probe 结论填充）**
+- [ ] **Step 0: 前置要求** — P0.1 到 P0.12 必须已全部提交，`plugins/minimax/skills/minimax-cli-runtime/SKILL.md` 必须已存在且所有占位符已填
+
+```bash
+test -f plugins/minimax/skills/minimax-cli-runtime/SKILL.md || { echo "SKILL.md missing — upstream probe tasks did not create it"; exit 1; }
+# 检查占位符是否仍在
+if grep -q '<probe-fill>' plugins/minimax/skills/minimax-cli-runtime/SKILL.md; then
+  echo "ERROR: unresolved <probe-fill> markers remain:"
+  grep -n '<probe-fill>' plugins/minimax/skills/minimax-cli-runtime/SKILL.md
+  exit 1
+fi
+```
+
+- [ ] **Step 1: 终版核对**
+
+打开 `plugins/minimax/skills/minimax-cli-runtime/SKILL.md`，确认：
+1. frontmatter `name: minimax-cli-runtime` / `description: ...`
+2. 10 节内容都齐全（Runtime requirements / Companion subcommands / Mini-Agent CLI facts / Config write contract / Log attribution / API key redaction / Session & resume / Do NOT / 等）
+3. 所有 probe 数据都是具体值（不是 `<probe-fill>` 或 `TBD`）
+4. 风格一致（中英混用统一、列表缩进统一）
 
 ```bash
 mkdir -p plugins/minimax/skills/minimax-cli-runtime
@@ -1115,20 +1213,23 @@ text.replace(/sk-[A-Za-z0-9_\-\.]{20,}/g, "sk-***REDACTED***")
 
 **注意**：上面的 `<probe-fill>` 位置需要在写入文件时替换为 probe 01-12 的实际数值。如果 probe 结论尚未填满，用 `TBD (probe pending)` 标记——但因为此 Task 在 P0.13，所有 probe 已完成，不应有 TBD。
 
+> **note**：上面展示的完整 SKILL.md 模板是**增量构建产物**。下面给出的是**实际每个 probe task 应在末尾追加的"填 SKILL.md 占位符"子步骤模板**，由 P0.1 probe task 的 executor 创建骨架，后续 probe task 各自 fill。v0.1 plan 为简化，选择在 P0.13 一次性呈现完整模板 + 让 executor 按"前面 probe 的报告 + 自己的结论"最终化——这是 v3 的中间方案：不再一次性 12-way fill，但也不强制每 probe task 编辑 SKILL.md。Phase 2 plan 写 Phase 2 skill 时改为全增量模式。
+
 - [ ] **Step 2: Verify file structure**
 
 ```bash
 ls plugins/minimax/skills/minimax-cli-runtime/SKILL.md
 head -5 plugins/minimax/skills/minimax-cli-runtime/SKILL.md
+grep -c '<probe-fill>' plugins/minimax/skills/minimax-cli-runtime/SKILL.md  # 必须为 0
 ```
 
-Expected: frontmatter with `name: minimax-cli-runtime`.
+Expected: frontmatter with `name: minimax-cli-runtime`；grep 输出 `0`。
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add plugins/minimax/skills/minimax-cli-runtime/SKILL.md
-git commit -m "feat(skill): minimax-cli-runtime v0.1 draft from probe results"
+git commit -m "feat(skill): minimax-cli-runtime v0.1 finalized from probe results (plan v3)"
 ```
 
 ---
@@ -1138,12 +1239,25 @@ git commit -m "feat(skill): minimax-cli-runtime v0.1 draft from probe results"
 ### Task 1.1: Initialize repo root files
 
 **Files:**
-- Create: `.gitignore`
+- Modify: `.gitignore`（baseline 已有极简版，本 task 扩充）
 - Create: `README.md`
 - Create: `CLAUDE.md`
 - Create: `CHANGELOG.md`（根）
 
-- [ ] **Step 1: Write `.gitignore`**
+- [ ] **Step 1: 扩充 `.gitignore`**
+
+读当前 `.gitignore`，追加（保持已有）：
+
+```
+# plan v3 扩充项
+coverage/
+.env
+.env.local
+*.swp
+.cache/
+```
+
+最终 `.gitignore` 完整内容：
 
 ```
 node_modules/
@@ -1152,7 +1266,12 @@ node_modules/
 /tmp/
 /plugins/minimax/scripts/*.tmp
 /plugins/minimax/scripts/*.bak
-.mini-agent/config/.lock
+**/.lock
+coverage/
+.env
+.env.local
+*.swp
+.cache/
 ```
 
 - [ ] **Step 2: Write `CLAUDE.md`**
