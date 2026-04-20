@@ -782,6 +782,145 @@ function stripAnsiSgr(s) {
   return String(s).replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+// ── classifyMiniAgentResult (spec §4.1 three-layer sentinel) ────────────────
+
+const FINISH_REASON_SUCCESS = new Set(["stop", "stop_sequence"]);
+const FINISH_REASON_TRUNCATED = new Set(["length", "max_tokens"]);
+const FINISH_REASON_INCOMPLETE = new Set(["tool_calls", "tool_use", "content_filter", "function_call"]);
+
+const LAYER3_RETRY_FAILED = /❌?\s*Retry failed|LLM call failed after/;
+const LAYER3_SESSION_STATS = /Session Statistics:/;
+
+/**
+ * Classify a callMiniAgent result into a stable status string per spec §4.1.
+ *
+ * @param {object} ctx - output of callMiniAgent (rawStdout, rawStderr, exitCode,
+ *                       signal, spawnError, timedOut, logPath, logParse)
+ * @returns {object} `{status, reason?, detail?, response?, toolCalls?, thinking?,
+ *                     finishReason?, logPath?, diagnostic?}`
+ */
+export function classifyMiniAgentResult(ctx) {
+  const {
+    rawStdout = "",
+    rawStderr = "",
+    spawnError = null,
+    timedOut = false,
+    logPath = null,
+    logParse = null,
+  } = ctx || {};
+
+  const stdoutStripped = stripAnsiSgr(rawStdout);
+  const stderrStripped = stripAnsiSgr(rawStderr);
+  const combined = stderrStripped + "\n" + stdoutStripped;
+
+  // Hard-fail preconditions: spawnError and timeout come first.
+  if (spawnError) {
+    if (spawnError.code === "ENOENT") {
+      return makeFailure("not-installed", "mini-agent binary not found on PATH", ctx, stdoutStripped, stderrStripped);
+    }
+    return makeFailure("spawn-failed", redactSecrets(spawnError.message || String(spawnError)), ctx, stdoutStripped, stderrStripped);
+  }
+
+  if (timedOut) {
+    return makeFailure("llm-call-failed", undefined, ctx, stdoutStripped, stderrStripped, "hard-timeout");
+  }
+
+  // Layer 1 - source constants (most stable)
+  if (SOCKS_IMPORT_ERROR_PATTERN.test(combined)) {
+    return makeFailure("needs-socksio", "httpx SOCKS extra missing", ctx, stdoutStripped, stderrStripped);
+  }
+  if (CONFIG_NOT_CONFIGURED_PATTERN.test(combined)) {
+    return makeFailure("auth-not-configured", "Mini-Agent ValueError: invalid API key", ctx, stdoutStripped, stderrStripped);
+  }
+  if (CONFIG_NOT_FOUND_PATTERN.test(combined)) {
+    return makeFailure("config-missing", "Mini-Agent FileNotFoundError", ctx, stdoutStripped, stderrStripped);
+  }
+
+  // Layer 2 - log structure (P0.2 OpenAI schema)
+  if (logParse && logParse.ok && logParse.finishReason) {
+    if (FINISH_REASON_SUCCESS.has(logParse.finishReason) && logParse.response) {
+      return {
+        status: "success",
+        response: logParse.response,
+        toolCalls: logParse.toolCalls || [],
+        thinking: logParse.thinking ?? null,
+        finishReason: logParse.finishReason,
+        logPath,
+      };
+    }
+    if (FINISH_REASON_TRUNCATED.has(logParse.finishReason)) {
+      return {
+        status: "success-but-truncated",
+        response: logParse.response || "",
+        toolCalls: logParse.toolCalls || [],
+        thinking: logParse.thinking ?? null,
+        finishReason: logParse.finishReason,
+        logPath,
+        diagnostic: buildDiagnostic("success-but-truncated", stdoutStripped, stderrStripped, logParse, logPath),
+      };
+    }
+    if (FINISH_REASON_INCOMPLETE.has(logParse.finishReason)) {
+      return {
+        status: "incomplete",
+        response: logParse.response || "",
+        toolCalls: logParse.toolCalls || [],
+        thinking: logParse.thinking ?? null,
+        finishReason: logParse.finishReason,
+        logPath,
+        diagnostic: buildDiagnostic("incomplete", stdoutStripped, stderrStripped, logParse, logPath),
+      };
+    }
+  }
+
+  // Layer 3 - stdout sentinel (most fragile; fallback)
+  if (LAYER3_RETRY_FAILED.test(stdoutStripped) || LAYER3_RETRY_FAILED.test(stderrStripped)) {
+    return makeFailure("llm-call-failed", undefined, ctx, stdoutStripped, stderrStripped);
+  }
+  if (LAYER3_SESSION_STATS.test(stdoutStripped) && (!logParse || !logParse.ok)) {
+    return makeFailure(
+      "success-claimed-but-no-log",
+      "Session Statistics present but log did not yield a terminal RESPONSE block",
+      ctx, stdoutStripped, stderrStripped
+    );
+  }
+
+  return makeFailure("unknown-crashed", undefined, ctx, stdoutStripped, stderrStripped);
+}
+
+function makeFailure(status, detail, ctx, stdoutStripped, stderrStripped, reason) {
+  const result = {
+    status,
+    response: "",
+    toolCalls: [],
+    thinking: null,
+    finishReason: ctx?.logParse?.finishReason ?? null,
+    logPath: ctx?.logPath ?? null,
+    diagnostic: buildDiagnostic(status, stdoutStripped, stderrStripped, ctx?.logParse ?? null, ctx?.logPath ?? null),
+  };
+  if (reason !== undefined) result.reason = reason;
+  if (detail !== undefined) result.detail = redactSecrets(detail);
+  return result;
+}
+
+function buildDiagnostic(status, stdoutStripped, stderrStripped, logParse, logPath) {
+  // spec §4.5: stderrHeadTail = first 256 + last 2048; no hard byte truncation elsewhere.
+  const head = stderrStripped.slice(0, 256);
+  const tail = stderrStripped.slice(Math.max(0, stderrStripped.length - 2048));
+  const stderrHeadTail = stderrStripped.length > (256 + 2048)
+    ? `${head}\n... <${stderrStripped.length - 256 - 2048} bytes elided> ...\n${tail}`
+    : stderrStripped;
+  return {
+    status,
+    stderrHeadTail: redactSecrets(stderrHeadTail),
+    stdoutTail: redactSecrets(stdoutStripped.slice(Math.max(0, stdoutStripped.length - 2048))),
+    lastCompleteResponseBlock: (logParse && logParse.ok)
+      ? { content: logParse.response, toolCalls: logParse.toolCalls, finishReason: logParse.finishReason }
+      : null,
+    lastPartialResponseRaw: (logParse && !logParse.ok) ? (logParse.lastPartialResponseRaw ?? null) : null,
+    logPath: logPath ?? null,
+  };
+}
+
 export async function getMiniAgentAuthStatus(cwd) {
   const cfg = readMiniAgentConfig();
   if (cfg.readError === "config-missing") {
@@ -791,50 +930,15 @@ export async function getMiniAgentAuthStatus(cwd) {
     return { loggedIn: false, reason: "auth-not-configured", detail: "api_key is placeholder or empty" };
   }
 
-  const result = await spawnWithHardTimeout(
-    MINI_AGENT_BIN,
-    ["-t", "ping", "-w", cwd || process.cwd()],
-    { timeoutMs: AUTH_CHECK_TIMEOUT_MS }
-  );
+  const r = await callMiniAgent({
+    prompt: "ping",
+    cwd: cwd || process.cwd(),
+    timeout: AUTH_CHECK_TIMEOUT_MS,
+  });
 
-  if (result.spawnError) {
-    if (result.spawnError.code === "ENOENT") {
-      return { loggedIn: false, reason: "not-installed", detail: `${MINI_AGENT_BIN} not found` };
-    }
-    return { loggedIn: false, reason: "spawn-failed", detail: redactSecrets(result.spawnError.message) };
+  const cls = classifyMiniAgentResult(r);
+  if (cls.status === "success") {
+    return { loggedIn: true, model: cfg.model || null, apiBase: cfg.api_base || null };
   }
-  if (result.timedOut) {
-    return { loggedIn: false, reason: "ping-timeout", detail: `no response within ${AUTH_CHECK_TIMEOUT_MS}ms` };
-  }
-
-  const stdout = stripAnsiSgr(result.stdout);
-  const stderr = stripAnsiSgr(result.stderr);
-  const combined = stderr + "\n" + stdout;
-
-  // Layer 1: 源码常量（稳定跨 locale）
-  if (SOCKS_IMPORT_ERROR_PATTERN.test(combined)) {
-    return { loggedIn: false, reason: "needs-socksio", detail: "httpx 缺 socksio extra；运行 uv tool install --force --with socksio git+..." };
-  }
-  if (CONFIG_NOT_CONFIGURED_PATTERN.test(combined)) {
-    return { loggedIn: false, reason: "auth-not-configured", detail: "Mini-Agent ValueError: invalid API key" };
-  }
-  if (CONFIG_NOT_FOUND_PATTERN.test(combined)) {
-    return { loggedIn: false, reason: "config-missing", detail: "Mini-Agent FileNotFoundError" };
-  }
-
-  // Layer 2: 日志文件（主判定）——P0.2 修订：finish_reason === "stop"
-  const logPath = extractLogPathFromStdout(stdout);
-  if (logPath) {
-    const parsed = await parseFinalResponseFromLog(logPath);
-    if (parsed.ok && parsed.response && parsed.finishReason === "stop") {
-      return { loggedIn: true, model: cfg.model || null, apiBase: cfg.api_base || null };
-    }
-  }
-
-  // Layer 3: stdout sentinel（strip ANSI 后）
-  if (/❌\s*Retry failed/.test(stdout) || /LLM call failed after/.test(stdout) || /401[^0-9].*authentication_error/.test(stdout)) {
-    return { loggedIn: false, reason: "llm-call-failed", detail: redactSecrets(stdout.split("\n").filter(l => /error|failed/i.test(l)).slice(-3).join(" | ")) };
-  }
-
-  return { loggedIn: false, reason: "unknown-crashed", detail: redactSecrets((stderr || stdout).slice(-200)) };
+  return { loggedIn: false, reason: cls.status, detail: cls.detail || cls.reason || null };
 }

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { callMiniAgent } from "./minimax.mjs";
+import { callMiniAgent, classifyMiniAgentResult } from "./minimax.mjs";
 
 function mkMockMiniAgent(script) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-mock-"));
@@ -149,4 +149,123 @@ sleep 30
   const dt = Date.now() - t0;
   assert.equal(r.timedOut, true);
   assert.ok(dt < 10_000, `timeout should resolve quickly, took ${dt}ms`);
+});
+
+test("classifyMiniAgentResult: success when finish_reason=stop + non-empty content", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "Log file: /tmp/x.log\nSession Statistics:\n",
+    rawStderr: "",
+    exitCode: 0,
+    signal: null,
+    spawnError: null,
+    timedOut: false,
+    logPath: "/tmp/x.log",
+    logParse: { ok: true, partial: false, response: "hi", toolCalls: [], thinking: null, finishReason: "stop" },
+  });
+  assert.equal(r.status, "success");
+  assert.equal(r.response, "hi");
+});
+
+test("classifyMiniAgentResult: success-but-truncated when finish_reason=length", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "", rawStderr: "", exitCode: 0, signal: null, spawnError: null, timedOut: false,
+    logPath: "/tmp/x.log",
+    logParse: { ok: true, partial: false, response: "partial text", toolCalls: [], thinking: null, finishReason: "length" },
+  });
+  assert.equal(r.status, "success-but-truncated");
+});
+
+test("classifyMiniAgentResult: incomplete when finish_reason=tool_calls (agent未闭环)", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "", rawStderr: "", exitCode: 0, signal: null, spawnError: null, timedOut: false,
+    logPath: "/tmp/x.log",
+    logParse: { ok: true, partial: false, response: "", toolCalls: [{id:"a",name:"bash",arguments:{}}], thinking: null, finishReason: "tool_calls" },
+  });
+  assert.equal(r.status, "incomplete");
+});
+
+test("classifyMiniAgentResult: needs-socksio overrides log-based classification (Layer 1)", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "",
+    rawStderr: "ImportError: Using SOCKS proxy but socksio not installed\n",
+    exitCode: 0, signal: null, spawnError: null, timedOut: false,
+    logPath: null, logParse: null,
+  });
+  assert.equal(r.status, "needs-socksio");
+});
+
+test("classifyMiniAgentResult: config-missing (Layer 1)", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "", rawStderr: "Configuration file not found at ~/.mini-agent/config/config.yaml\n",
+    exitCode: 0, signal: null, spawnError: null, timedOut: false,
+    logPath: null, logParse: null,
+  });
+  assert.equal(r.status, "config-missing");
+});
+
+test("classifyMiniAgentResult: auth-not-configured (Layer 1)", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "", rawStderr: "ValueError: Please configure a valid API Key\n",
+    exitCode: 0, signal: null, spawnError: null, timedOut: false,
+    logPath: null, logParse: null,
+  });
+  assert.equal(r.status, "auth-not-configured");
+});
+
+test("classifyMiniAgentResult: not-installed when spawnError ENOENT", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "", rawStderr: "", exitCode: null, signal: null,
+    spawnError: Object.assign(new Error("spawn mini-agent ENOENT"), { code: "ENOENT" }),
+    timedOut: false, logPath: null, logParse: null,
+  });
+  assert.equal(r.status, "not-installed");
+});
+
+test("classifyMiniAgentResult: llm-call-failed when Retry failed in stdout (Layer 3)", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "\x1b[31m❌ Retry failed\x1b[0m after 3 attempts\nSession Statistics:\n",
+    rawStderr: "", exitCode: 0, signal: null, spawnError: null, timedOut: false,
+    logPath: "/tmp/x.log",
+    logParse: { ok: false, partial: true, reason: "no-response-block", response: "", toolCalls: [] },
+  });
+  assert.equal(r.status, "llm-call-failed");
+});
+
+test("classifyMiniAgentResult: success-claimed-but-no-log (Layer 3 fallback)", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "Session Statistics:\nDuration: 1.2s\n", rawStderr: "",
+    exitCode: 0, signal: null, spawnError: null, timedOut: false,
+    logPath: null, logParse: null,
+  });
+  assert.equal(r.status, "success-claimed-but-no-log");
+});
+
+test("classifyMiniAgentResult: unknown-crashed default fallback", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "", rawStderr: "some unexpected error\n",
+    exitCode: 1, signal: null, spawnError: null, timedOut: false,
+    logPath: null, logParse: null,
+  });
+  assert.equal(r.status, "unknown-crashed");
+});
+
+test("classifyMiniAgentResult: timedOut maps to llm-call-failed with reason=hard-timeout", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "", rawStderr: "", exitCode: null, signal: "SIGKILL",
+    spawnError: null, timedOut: true, logPath: null, logParse: null,
+  });
+  assert.equal(r.status, "llm-call-failed");
+  assert.equal(r.reason, "hard-timeout");
+});
+
+test("classifyMiniAgentResult: diagnostic bundle includes stderr head+tail (ANSI stripped)", () => {
+  const stderr = "line1\n\x1b[31merror: something\x1b[0m\n" + "x".repeat(3000) + "\ntail line\n";
+  const r = classifyMiniAgentResult({
+    rawStdout: "", rawStderr: stderr, exitCode: 0, signal: null, spawnError: null, timedOut: false,
+    logPath: null, logParse: null,
+  });
+  assert.ok(r.diagnostic, "diagnostic bundle exists for non-success");
+  assert.ok(!r.diagnostic.stderrHeadTail.includes("\x1b["), "ANSI stripped");
+  assert.ok(r.diagnostic.stderrHeadTail.includes("line1"));
+  assert.ok(r.diagnostic.stderrHeadTail.includes("tail line"));
 });
