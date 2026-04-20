@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Plan version**: **v4** — 整合 plan v3 review 反馈后的 4 条必修（gemini CRITICAL: Task 1.9 过载拆成 1.9a / 1.9b / codex: P0.5 `-w $MOCK_CWD` 真隔离第一级搜索 / codex: Task 1.9a 加 scanBraces 跨行字符串 + 转义引号回归测试 / codex: Task 1.7 合并重复 Step 6）。v2/v3 的 20 条修正继续有效。三轮 plan review 已收敛明显：v1→v2 修 11 条，v2→v3 修 9 条，v3→v4 修 4 条；两家已一致判断 "停止 review 循环，进执行"。
+**Plan version**: **v5** — Phase 0 probes 跑完后回炉修订。P0.2 发现 Mini-Agent 日志用 OpenAI 兼容规范化格式（非 Anthropic 原始）：`finish_reason` / `content` 字符串 / `tool_calls` 顶层数组 / 3 种 block kind (REQUEST/RESPONSE/TOOL_RESULT) / log_index 跨 kind 递增。Task 1.9a parser 代码、测试 fixtures、SKILL.md 模板、spec §3.5 / §4.1 全部同步。P0.10 FAIL → Phase 4 必须串行化（spec §4.6 已加约束）。v2/v3/v4 的 24 条修正继续有效。
 
 **Goal:** Build the minimal working skeleton of `minimax-plugin-cc` — a Claude Code plugin wrapping MiniMax-AI/Mini-Agent — sufficient to pass spec acceptance tests **T1** (`/minimax:setup --json` returns full status), **T8** (install flow on a fresh environment), **T12** (YAML write preserves other fields, **using mock config path, never touches user real file**), **T13** (SOCKS auto-recovery). Probe the 11 remaining unknowns from spec §7 (P0.9 已完成 env-auth 结论，本 plan 只文档化).
 
@@ -1152,8 +1152,11 @@ These constants are the direct result of Phase 0 probes. Do not re-derive.
 - **RESPONSE block structure** (probe 02):
   - Separator: `^-{80}$`
   - Block header: `^\[([0-9]+)\] (REQUEST|RESPONSE)$`
-  - RESPONSE JSON: Anthropic message format (`role` / `content[]` / `stop_reason` / `usage`)
-  - 终态选择规则：从最大 N 倒序遍历，选第一个有 `stop_reason` 或非空 `content[].text` 的 block
+  - RESPONSE JSON: **OpenAI 兼容规范化格式**（P0.2 实测；非 Anthropic 原始）
+    `{ content: <string>, thinking?: <string>, tool_calls?: [{id,name,arguments}], finish_reason: "stop"|"length"|"tool_calls"|... }`
+  - **3 种 block kind**: `REQUEST` / `RESPONSE` / `TOOL_RESULT`；log_index 跨 kind 连续递增
+  - Separator: file header `=` × 80，block 分隔 `-` × 80（parser 必须区分）
+  - 终态选择规则：从最大 N 倒序遍历 RESPONSE 块，选第一个有 `finish_reason` ∈ `{stop,length,tool_calls,tool_use,content_filter,max_tokens}` 或非空 `content` 字符串的 block
 - **Large prompts** (probe 04): use `<stdin|argv|tmpfile>` strategy, limit `<N>` bytes for argv
 - **Failure sentinels 三层优先级** (probe 05):
   - Layer 1 (source constants):
@@ -1161,7 +1164,7 @@ These constants are the direct result of Phase 0 probes. Do not re-derive.
     - `config.py:78 "Configuration file not found"` → config-missing
     - spawn ENOENT → not-installed
     - stderr `ImportError: Using SOCKS proxy` → needs-socksio
-  - Layer 2 (log structure): 日志末尾终态 RESPONSE block 的 `stop_reason`
+  - Layer 2 (log structure): 日志末尾终态 RESPONSE block 的 `finish_reason`（P0.2 修订；字符串 `content` 非空也算终态）
   - Layer 3 (stdout sentinels，ANSI strip 后):
     - `❌ Retry failed` / `LLM call failed after N retries` → llm-call-failed
     - `Session Statistics:` 无日志 → success-claimed-but-no-log
@@ -2509,8 +2512,11 @@ function scanBraces(line, startInString) {
 }
 
 /**
- * Parse Mini-Agent log into RESPONSE blocks using a line-by-line state machine.
- * Returns array of { n, kind: "RESPONSE", json: parsed | null, raw, truncated? }.
+ * Parse Mini-Agent log into blocks using a line-by-line state machine.
+ * Returns array of { n, kind: "REQUEST"|"RESPONSE"|"TOOL_RESULT", json, raw, truncated? }.
+ *
+ * P0.2 confirmed: block header `[N] <KIND>`, log_index continuous across kinds,
+ * block separator `-` × 80 (distinct from file header `=` × 80).
  */
 function parseLogBlocks(text) {
   const STATE = { SEEK_HEADER: 0, SKIP_TO_BODY: 1, COLLECT_BODY: 2 };
@@ -2538,9 +2544,10 @@ function parseLogBlocks(text) {
 
   for (const line of lines) {
     if (state === STATE.SEEK_HEADER) {
-      const m = line.match(/^\[(\d+)\]\s+(REQUEST|RESPONSE)$/);
-      if (m && m[2] === "RESPONSE") {
-        current = { n: parseInt(m[1], 10), kind: "RESPONSE" };
+      // P0.2 修订：block kind 三种 REQUEST/RESPONSE/TOOL_RESULT
+      const m = line.match(/^\[(\d+)\]\s+(REQUEST|RESPONSE|TOOL_RESULT)$/);
+      if (m) {
+        current = { n: parseInt(m[1], 10), kind: m[2] };
         state = STATE.SKIP_TO_BODY;
       }
       continue;
@@ -2578,28 +2585,38 @@ function parseLogBlocks(text) {
   return blocks;
 }
 
-const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "tool_use", "max_tokens"]);
+// P0.2 实测：Mini-Agent 日志用 OpenAI 兼容格式
+// finish_reason 合法值: stop / length / tool_calls / tool_use / content_filter
+const TERMINAL_FINISH_REASONS = new Set([
+  "stop", "stop_sequence", "length", "tool_calls", "tool_use", "content_filter", "max_tokens"
+]);
 
 function pickTerminalResponse(blocks) {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const b = blocks[i];
     if (!b.json) continue;
-    const hasStop = typeof b.json.stop_reason === "string" && TERMINAL_STOP_REASONS.has(b.json.stop_reason);
-    const contentArr = Array.isArray(b.json.content) ? b.json.content : [];
-    const hasNonEmptyText = contentArr.some(c => c.type === "text" && typeof c.text === "string" && c.text.length > 0);
-    if (hasStop || hasNonEmptyText) return b;
+    const hasFinishReason = typeof b.json.finish_reason === "string"
+      && TERMINAL_FINISH_REASONS.has(b.json.finish_reason);
+    const hasNonEmptyContent = typeof b.json.content === "string" && b.json.content.length > 0;
+    if (hasFinishReason || hasNonEmptyContent) return b;
   }
   return null;
 }
 
 function extractToolCalls(responseJson) {
-  const arr = Array.isArray(responseJson?.content) ? responseJson.content : [];
-  return arr.filter(c => c.type === "tool_use").map(c => ({ name: c.name, input: c.input }));
+  // P0.2 修订：tool_calls 是顶层字段（OpenAI 格式 [{id, name, arguments}]）
+  const arr = Array.isArray(responseJson?.tool_calls) ? responseJson.tool_calls : [];
+  return arr.map(c => ({ id: c.id, name: c.name, arguments: c.arguments }));
 }
 
 function extractTextResponse(responseJson) {
-  const arr = Array.isArray(responseJson?.content) ? responseJson.content : [];
-  return arr.filter(c => c.type === "text" && typeof c.text === "string").map(c => c.text).join("\n");
+  // P0.2 修订：content 是字符串（非数组）
+  return typeof responseJson?.content === "string" ? responseJson.content : "";
+}
+
+function extractThinking(responseJson) {
+  // P0.2 观察：thinking 是可选的顶层字段（reasoning trace）
+  return typeof responseJson?.thinking === "string" ? responseJson.thinking : null;
 }
 
 /**
@@ -2638,7 +2655,8 @@ export async function parseFinalResponseFromLog(logPath) {
       partial: false,
       response: extractTextResponse(picked.json),
       toolCalls: extractToolCalls(picked.json),
-      stopReason: picked.json.stop_reason || null,
+      thinking: extractThinking(picked.json),
+      finishReason: picked.json.finish_reason || null,  // P0.2 修订：field 名和值都改
       blockIndex: picked.n,
     };
   }
@@ -2728,7 +2746,9 @@ async function asyncTest(name, fn) {
 
   console.log("# parseFinalResponseFromLog (state machine)");
 
-  await asyncTest("parses single-block terminal RESPONSE", async () => {
+  // P0.2 实测：RESPONSE JSON 用 OpenAI 兼容格式
+  // {content: <string>, tool_calls: [...], finish_reason: "stop"|"tool_use"|...}
+  await asyncTest("parses single-block terminal RESPONSE (OpenAI compat shape)", async () => {
     const logContent = `Agent Run Log
 ================================================================================
 
@@ -2741,23 +2761,23 @@ Timestamp: 2026-04-20 10:44:37
 
 
 --------------------------------------------------------------------------------
-[1] RESPONSE
+[2] RESPONSE
 Timestamp: 2026-04-20 10:44:41
 --------------------------------------------------------------------------------
 
-{"role":"assistant","content":[{"type":"text","text":"Hello!"}],"stop_reason":"end_turn"}
+{"content":"Hello!","finish_reason":"stop"}
 `;
     const p = `/tmp/mm-parse-test-${Date.now()}.log`;
     fs.writeFileSync(p, logContent);
     const r = await parseFinalResponseFromLog(p);
     assertEqual(r.ok, true);
     assertEqual(r.response, "Hello!");
-    assertEqual(r.stopReason, "end_turn");
-    assertEqual(r.blockIndex, 1);
+    assertEqual(r.finishReason, "stop");
+    assertEqual(r.blockIndex, 2);  // log_index 跨 kind 连续递增 (P0.2)
     fs.unlinkSync(p);
   });
 
-  await asyncTest("picks LAST terminal RESPONSE in multi-block log (tool_use 中间 + text 末尾)", async () => {
+  await asyncTest("picks LAST terminal RESPONSE in multi-block log (tool_calls 中间 + stop 末尾)", async () => {
     const logContent = `Agent Run Log
 ================================================================================
 
@@ -2768,42 +2788,68 @@ Timestamp: 2026-04-20 10:44:41
 {"messages":[]}
 
 --------------------------------------------------------------------------------
-[1] RESPONSE
+[2] RESPONSE
 --------------------------------------------------------------------------------
 
-{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash","input":{"command":"ls"}}],"stop_reason":"tool_use"}
+{"content":"","tool_calls":[{"id":"t1","name":"bash","arguments":{"command":"ls"}}],"finish_reason":"tool_calls"}
 
 
 --------------------------------------------------------------------------------
-[2] REQUEST
+[3] TOOL_RESULT
+--------------------------------------------------------------------------------
+
+{"output":"file1\\nfile2"}
+
+
+--------------------------------------------------------------------------------
+[4] REQUEST
 --------------------------------------------------------------------------------
 
 {"messages":[]}
 
 --------------------------------------------------------------------------------
-[2] RESPONSE
+[5] RESPONSE
 --------------------------------------------------------------------------------
 
-{"role":"assistant","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}
+{"content":"Done.","finish_reason":"stop"}
 `;
     const p = `/tmp/mm-parse-multi-${Date.now()}.log`;
     fs.writeFileSync(p, logContent);
     const r = await parseFinalResponseFromLog(p);
     assertEqual(r.ok, true);
     assertEqual(r.response, "Done.");
-    assertEqual(r.blockIndex, 2);
-    assertEqual(r.stopReason, "end_turn");
+    assertEqual(r.blockIndex, 5);
+    assertEqual(r.finishReason, "stop");
     fs.unlinkSync(p);
   });
 
-  await asyncTest("handles JSON with { } inside strings", async () => {
+  await asyncTest("extracts tool_calls from top-level field (OpenAI shape)", async () => {
     const logContent = `Agent Run Log
 
 --------------------------------------------------------------------------------
 [1] RESPONSE
 --------------------------------------------------------------------------------
 
-{"role":"assistant","content":[{"type":"text","text":"The symbol is { or }."}],"stop_reason":"end_turn"}
+{"content":"","tool_calls":[{"id":"t1","name":"read_file","arguments":{"path":"/tmp/foo"}}],"finish_reason":"tool_calls"}
+`;
+    const p = `/tmp/mm-parse-tc-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, true);
+    assertEqual(Array.isArray(r.toolCalls) && r.toolCalls.length, 1);
+    assertEqual(r.toolCalls[0].name, "read_file");
+    assertEqual(r.toolCalls[0].arguments.path, "/tmp/foo");
+    fs.unlinkSync(p);
+  });
+
+  await asyncTest("handles JSON with { } inside string content", async () => {
+    const logContent = `Agent Run Log
+
+--------------------------------------------------------------------------------
+[1] RESPONSE
+--------------------------------------------------------------------------------
+
+{"content":"The symbol is { or }.","finish_reason":"stop"}
 `;
     const p = `/tmp/mm-parse-strings-${Date.now()}.log`;
     fs.writeFileSync(p, logContent);
@@ -2813,9 +2859,8 @@ Timestamp: 2026-04-20 10:44:41
     fs.unlinkSync(p);
   });
 
-  await asyncTest("handles multi-line string spanning lines (scanBraces cross-line state)", async () => {
-    // JSON 合法：真实换行在 JSON 字符串里必须是 `\n` escape；但日志里的 JSON body 可能被打印为多行 pretty-printed
-    // parseLogBlocks 的 scanBraces 必须跨行维护字符串状态
+  await asyncTest("handles multi-line pretty-printed JSON (scanBraces cross-line state)", async () => {
+    // JSON body 被 Mini-Agent 打印为 pretty-printed；scanBraces 必须跨行维护字符串状态
     const logContent = `Agent Run Log
 
 --------------------------------------------------------------------------------
@@ -2823,14 +2868,8 @@ Timestamp: 2026-04-20 10:44:41
 --------------------------------------------------------------------------------
 
 {
-  "role": "assistant",
-  "content": [
-    {
-      "type": "text",
-      "text": "line 1 of answer\\nline 2 has a { brace not in string at all\\nline 3 has } too"
-    }
-  ],
-  "stop_reason": "end_turn"
+  "content": "line 1 of answer\\nline 2 has a { brace not in string at all\\nline 3 has } too",
+  "finish_reason": "stop"
 }
 `;
     const p = `/tmp/mm-parse-multiline-${Date.now()}.log`;
@@ -2838,7 +2877,7 @@ Timestamp: 2026-04-20 10:44:41
     const r = await parseFinalResponseFromLog(p);
     assertEqual(r.ok, true);
     assertEqual(r.response.includes("line 3 has }"), true);
-    assertEqual(r.stopReason, "end_turn");
+    assertEqual(r.finishReason, "stop");
     fs.unlinkSync(p);
   });
 
@@ -2850,13 +2889,34 @@ Timestamp: 2026-04-20 10:44:41
 [1] RESPONSE
 --------------------------------------------------------------------------------
 
-{"role":"assistant","content":[{"type":"text","text":"He said \\"hello { world }\\" then left"}],"stop_reason":"end_turn"}
+{"content":"He said \\"hello { world }\\" then left","finish_reason":"stop"}
 `;
     const p = `/tmp/mm-parse-escquote-${Date.now()}.log`;
     fs.writeFileSync(p, logContent);
     const r = await parseFinalResponseFromLog(p);
     assertEqual(r.ok, true);
     assertEqual(r.response.includes("hello { world }"), true);
+    fs.unlinkSync(p);
+  });
+
+  await asyncTest("401 scenario (no RESPONSE block at all) returns partial:true", async () => {
+    // P0.2 实测：Mini-Agent 401 retry 耗尽后直接 return，跳过 log_response
+    // 所以日志里只有 REQUEST block，没有 RESPONSE block
+    const logContent = `Agent Run Log
+================================================================================
+
+--------------------------------------------------------------------------------
+[1] REQUEST
+--------------------------------------------------------------------------------
+
+{"messages":[{"role":"user","content":"hi"}]}
+`;
+    const p = `/tmp/mm-parse-401-${Date.now()}.log`;
+    fs.writeFileSync(p, logContent);
+    const r = await parseFinalResponseFromLog(p);
+    assertEqual(r.ok, false);
+    assertEqual(r.partial, true);
+    assertEqual(r.reason, "no-response-block");
     fs.unlinkSync(p);
   });
 
@@ -2975,11 +3035,11 @@ export async function getMiniAgentAuthStatus(cwd) {
     return { loggedIn: false, reason: "config-missing", detail: "Mini-Agent FileNotFoundError" };
   }
 
-  // Layer 2: 日志文件（主判定）——plan v3 修正：**必须 await**
+  // Layer 2: 日志文件（主判定）——P0.2 修订：finish_reason === "stop"
   const logPath = extractLogPathFromStdout(stdout);
   if (logPath) {
     const parsed = await parseFinalResponseFromLog(logPath);
-    if (parsed.ok && parsed.response && parsed.stopReason === "end_turn") {
+    if (parsed.ok && parsed.response && parsed.finishReason === "stop") {
       return { loggedIn: true, model: cfg.model || null, apiBase: cfg.api_base || null };
     }
   }
@@ -3628,7 +3688,7 @@ After completing the plan, verify:
 **3. Type consistency**：
 - `writeMiniAgentApiKey` 签名在 Task 1.7 定义、Task 1.13 T12 使用时一致 ✅
 - `getMiniAgentAuthStatus` 返回 shape `{loggedIn, reason, detail, model?, apiBase?}` 跨 Task 1.8 / 1.10 一致 ✅
-- `parseFinalResponseFromLog` 返回 shape `{ok, partial, response, toolCalls, stopReason, blockIndex, lastPartialResponseRaw?}` 在 Task 1.9 定义、在 Phase 2 使用（不在本 plan） ✅
+- `parseFinalResponseFromLog` 返回 shape `{ok, partial, response, toolCalls, thinking, finishReason, blockIndex, lastPartialResponseRaw?}` 在 Task 1.9a 定义（P0.2 修订字段）、1.9b 使用 finishReason === "stop" 判 auth 成功 ✅
 - `state.mjs::generateJobId` 的 `mj-` 前缀在 Task 1.5 smoke test 验证 ✅
 - 所有 export：`readYamlTopLevelKey` / `readMiniAgentConfig` / `validateYamlForApiKeyWrite` / `writeMiniAgentApiKey` / `getMiniAgentAvailability` / `getMiniAgentAuthStatus` / `extractLogPathFromStdout` / `parseFinalResponseFromLog` / `redactSecrets` / `_invalidateConfigCache` / `MINI_AGENT_BIN` / `MINI_AGENT_CONFIG_PATH` / `MINI_AGENT_LOG_DIR` / `MINI_AGENT_LOCK_PATH` / `PARENT_SESSION_ENV`——companion 里 import 命名一致 ✅
 
