@@ -1193,3 +1193,131 @@ export function extractReviewJson(raw) {
 
   return { ok: false, error: "no-json-found" };
 }
+
+// ── callMiniAgentReview: review-specific wrapper + 1-shot retry (Task 3.4) ──
+function reviewError({ error, firstRawText = null, rawText = null, parseError = null, truncated = false, retry_used = false, diagnostic = null }) {
+  return {
+    ok: false,
+    error,
+    firstRawText: firstRawText ? redactSecrets(String(firstRawText)) : null,
+    rawText: rawText ? redactSecrets(String(rawText)) : null,
+    parseError,
+    truncated,
+    retry_used,
+    retriedOnce: retry_used,
+    diagnostic,
+  };
+}
+
+export async function callMiniAgentReview({
+  context,
+  focus = "",
+  schemaPath,
+  cwd,
+  timeout = 120_000,
+  bin,
+  logDir,
+  truncated = false,
+  onProgressLine,
+}) {
+  let firstPrompt;
+  try {
+    firstPrompt = buildReviewPrompt({ schemaPath, focus, context });
+  } catch (e) {
+    return reviewError({ error: `schema-load-failed: ${e.message}`, truncated, retry_used: false });
+  }
+
+  const firstCall = await callMiniAgent({ prompt: firstPrompt, cwd, timeout, bin, logDir, onProgressLine });
+  const firstCls = classifyMiniAgentResult(firstCall);
+  if (firstCls.status !== "success" && firstCls.status !== "success-but-truncated") {
+    return reviewError({
+      error: `mini-agent call failed: ${firstCls.status}${firstCls.detail ? " -- " + firstCls.detail : ""}`,
+      truncated: truncated || firstCls.status === "success-but-truncated",
+      retry_used: false,
+      diagnostic: firstCls.diagnostic ?? null,
+    });
+  }
+
+  const firstTruncated = truncated || firstCls.status === "success-but-truncated";
+
+  const firstExtracted = extractReviewJson(firstCls.response);
+  let firstValidation = null;
+  if (firstExtracted.ok) {
+    firstValidation = validateReviewOutput(firstExtracted.data, schemaPath);
+    if (firstValidation.ok) {
+      return {
+        ok: true,
+        ...firstExtracted.data,
+        truncated: firstTruncated,
+        retry_used: false,
+        retriedOnce: false,
+        retry_notice: null,
+        logPath: firstCls.logPath,
+      };
+    }
+  }
+
+  const retryHint = firstExtracted.ok
+    ? `schema validation errors: ${firstValidation.errors.slice(0, 3).join("; ")}`
+    : `parse failure (${firstExtracted.error}${firstExtracted.parseError ? ": " + firstExtracted.parseError : ""})`;
+
+  process.stderr.write("Warning: minimax review response failed parse/validation; retrying once with error hint...\n");
+
+  let retryPrompt;
+  try {
+    retryPrompt = buildReviewPrompt({ schemaPath, focus, context, retryHint, previousRaw: firstCls.response });
+  } catch (e) {
+    return reviewError({
+      error: `Failed to rebuild retry prompt: ${e.message}`,
+      firstRawText: firstCls.response,
+      truncated: firstTruncated,
+      retry_used: true,
+    });
+  }
+
+  const retryCall = await callMiniAgent({ prompt: retryPrompt, cwd, timeout, bin, logDir, onProgressLine });
+  const retryCls = classifyMiniAgentResult(retryCall);
+  const retryTruncated = firstTruncated || retryCls.status === "success-but-truncated";
+
+  if (retryCls.status !== "success" && retryCls.status !== "success-but-truncated") {
+    return reviewError({
+      error: `retry mini-agent call failed: ${retryCls.status}${retryCls.detail ? " -- " + retryCls.detail : ""}`,
+      firstRawText: firstCls.response,
+      truncated: retryTruncated,
+      retry_used: true,
+      diagnostic: retryCls.diagnostic ?? null,
+    });
+  }
+
+  const retryExtracted = extractReviewJson(retryCls.response);
+  if (!retryExtracted.ok) {
+    return reviewError({
+      error: `review failed after 1 retry: ${retryExtracted.error}`,
+      parseError: retryExtracted.parseError ?? null,
+      firstRawText: firstCls.response,
+      rawText: retryCls.response,
+      truncated: retryTruncated,
+      retry_used: true,
+    });
+  }
+  const retryValidation = validateReviewOutput(retryExtracted.data, schemaPath);
+  if (!retryValidation.ok) {
+    return reviewError({
+      error: `review failed schema validation after 1 retry: ${retryValidation.errors.slice(0, 3).join("; ")}`,
+      firstRawText: firstCls.response,
+      rawText: retryCls.response,
+      truncated: retryTruncated,
+      retry_used: true,
+    });
+  }
+
+  return {
+    ok: true,
+    ...retryExtracted.data,
+    truncated: retryTruncated,
+    retry_used: true,
+    retriedOnce: true,
+    retry_notice: `Initial response failed; retry succeeded (hint: ${retryHint})`,
+    logPath: retryCls.logPath,
+  };
+}

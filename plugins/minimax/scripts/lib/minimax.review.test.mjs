@@ -266,3 +266,286 @@ test("buildReviewPrompt: throws when a substitution value injects an earlier-unu
     /unreplaced placeholder .*CONTEXT/
   );
 });
+
+import os from "node:os";
+import { callMiniAgentReview } from "./minimax.mjs";
+
+function buildReviewLog({ content, finishReason = "stop" }) {
+  const body = JSON.stringify({ content, thinking: null, tool_calls: [], finish_reason: finishReason });
+  return [
+    "=".repeat(80),
+    "Agent Run Log - 2026-04-20 10:44:30",
+    "=".repeat(80),
+    "",
+    "",
+    "-".repeat(80),
+    "[1] REQUEST",
+    "Timestamp: 2026-04-20 10:44:37.000",
+    "-".repeat(80),
+    "{\"messages\":[]}",
+    "",
+    "-".repeat(80),
+    "[2] RESPONSE",
+    "Timestamp: 2026-04-20 10:44:41.000",
+    "-".repeat(80),
+    "",
+    body,
+    "",
+    "",
+  ].join("\n");
+}
+
+function mkMockMiniAgentForReview({ logDir, content, finishReason = "stop", stdout = "", stderr = "" }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-review-mock-"));
+  const binPath = path.join(dir, "mini-agent");
+  const logPath = path.join(logDir, `review_${Date.now()}_${Math.random().toString(16).slice(2)}.log`);
+  const script = `#!/usr/bin/env node
+import fs from "node:fs";
+const logPath = ${JSON.stringify(logPath)};
+fs.writeFileSync(logPath, ${JSON.stringify(buildReviewLog({ content, finishReason }))});
+process.stdout.write("Log file: " + logPath + "\\n");
+${stdout ? `process.stdout.write(${JSON.stringify(stdout)});` : ""}
+process.stdout.write("Session Statistics:\\n");
+${stderr ? `process.stderr.write(${JSON.stringify(stderr)});` : ""}
+`;
+  fs.writeFileSync(binPath, script, { mode: 0o755 });
+  return { binPath, dir, logPath };
+}
+
+function mkStatefulMockForReview({ logDir, steps }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-review-stateful-"));
+  const binPath = path.join(dir, "mini-agent");
+  const counterPath = path.join(dir, "counter.txt");
+  const scriptedSteps = steps.map((step, index) => {
+    const logPath = step.writeLog === false
+      ? null
+      : path.join(logDir, `review_stateful_${index + 1}_${Date.now()}_${Math.random().toString(16).slice(2)}.log`);
+    return {
+      ...step,
+      logPath,
+      logText: logPath ? buildReviewLog({ content: step.content, finishReason: step.finishReason ?? "stop" }) : null,
+    };
+  });
+
+  const script = `#!/usr/bin/env node
+import fs from "node:fs";
+const counterPath = ${JSON.stringify(counterPath)};
+const steps = ${JSON.stringify(scriptedSteps)};
+let count = 0;
+try { count = Number(fs.readFileSync(counterPath, "utf8")) || 0; } catch {}
+count += 1;
+fs.writeFileSync(counterPath, String(count));
+const step = steps[Math.min(count - 1, steps.length - 1)];
+if (step.removeSelf) {
+  try { fs.unlinkSync(process.argv[1]); } catch {}
+}
+if (step.stderr) process.stderr.write(step.stderr);
+if (step.logPath) {
+  fs.writeFileSync(step.logPath, step.logText);
+  process.stdout.write("Log file: " + step.logPath + "\\n");
+}
+if (step.stdout) process.stdout.write(step.stdout);
+if (step.sessionStats !== false) process.stdout.write("Session Statistics:\\n");
+process.exit(step.exitCode ?? 0);
+`;
+  fs.writeFileSync(binPath, script, { mode: 0o755 });
+  return { binPath, dir, counterPath };
+}
+
+test("callMiniAgentReview: happy path succeeds without retry", async () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-review-log-"));
+  const { binPath } = mkMockMiniAgentForReview({
+    logDir,
+    content: JSON.stringify(validOutput()),
+  });
+
+  const r = await callMiniAgentReview({
+    context: "diff --git a/a.js b/a.js",
+    focus: "check findings",
+    schemaPath: SCHEMA_PATH,
+    cwd: process.cwd(),
+    timeout: 5_000,
+    bin: binPath,
+    logDir,
+  });
+
+  assert.equal(r.ok, true);
+  assert.equal(r.retry_used, false);
+  assert.equal(r.retriedOnce, false);
+  assert.equal(r.retry_notice, null);
+  assert.equal(r.verdict, "approve");
+});
+
+test("callMiniAgentReview: malformed first shot retries once and succeeds", async () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-review-log-"));
+  const { binPath } = mkStatefulMockForReview({
+    logDir,
+    steps: [
+      { content: '{"verdict":"approve"', finishReason: "stop" },
+      { content: JSON.stringify(validOutput()), finishReason: "stop" },
+    ],
+  });
+
+  const r = await callMiniAgentReview({
+    context: "diff",
+    focus: "",
+    schemaPath: SCHEMA_PATH,
+    cwd: process.cwd(),
+    timeout: 5_000,
+    bin: binPath,
+    logDir,
+  });
+
+  assert.equal(r.ok, true);
+  assert.equal(r.retry_used, true);
+  assert.equal(r.retriedOnce, true);
+  assert.match(r.retry_notice, /retry succeeded/);
+});
+
+test("callMiniAgentReview: schema-invalid first shot retries once and succeeds", async () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-review-log-"));
+  const invalid = validOutput();
+  delete invalid.verdict;
+  const { binPath } = mkStatefulMockForReview({
+    logDir,
+    steps: [
+      { content: JSON.stringify(invalid), finishReason: "stop" },
+      { content: JSON.stringify(validOutput()), finishReason: "stop" },
+    ],
+  });
+
+  const r = await callMiniAgentReview({
+    context: "diff",
+    focus: "",
+    schemaPath: SCHEMA_PATH,
+    cwd: process.cwd(),
+    timeout: 5_000,
+    bin: binPath,
+    logDir,
+  });
+
+  assert.equal(r.ok, true);
+  assert.equal(r.retry_used, true);
+  assert.equal(r.retriedOnce, true);
+  assert.equal(r.verdict, "approve");
+});
+
+test("callMiniAgentReview: both shots fail parse and preserve both raw texts", async () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-review-log-"));
+  const { binPath } = mkStatefulMockForReview({
+    logDir,
+    steps: [
+      { content: "not json at all", finishReason: "stop" },
+      { content: "{still-not-json", finishReason: "stop" },
+    ],
+  });
+
+  const r = await callMiniAgentReview({
+    context: "diff",
+    focus: "",
+    schemaPath: SCHEMA_PATH,
+    cwd: process.cwd(),
+    timeout: 5_000,
+    bin: binPath,
+    logDir,
+  });
+
+  assert.equal(r.ok, false);
+  assert.equal(r.retry_used, true);
+  assert.equal(r.retriedOnce, true);
+  assert.equal(typeof r.firstRawText, "string");
+  assert.equal(typeof r.rawText, "string");
+});
+
+test("callMiniAgentReview: missing binary returns not-installed diagnostic without retry", async () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-review-log-"));
+
+  const r = await callMiniAgentReview({
+    context: "diff",
+    focus: "",
+    schemaPath: SCHEMA_PATH,
+    cwd: process.cwd(),
+    timeout: 5_000,
+    bin: "/nonexistent/bin/mini-agent-review",
+    logDir,
+  });
+
+  assert.equal(r.ok, false);
+  assert.equal(r.retry_used, false);
+  assert.equal(r.retriedOnce, false);
+  assert.equal(r.diagnostic?.status, "not-installed");
+});
+
+test("callMiniAgentReview: success-but-truncated first shot still returns ok=true", async () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-review-log-"));
+  const { binPath } = mkMockMiniAgentForReview({
+    logDir,
+    content: JSON.stringify(validOutput()),
+    finishReason: "length",
+  });
+
+  const r = await callMiniAgentReview({
+    context: "diff",
+    focus: "",
+    schemaPath: SCHEMA_PATH,
+    cwd: process.cwd(),
+    timeout: 5_000,
+    bin: binPath,
+    logDir,
+  });
+
+  assert.equal(r.ok, true);
+  assert.equal(r.truncated, true, "classifier success-but-truncated propagated");
+  assert.equal(r.retry_used, false);
+});
+
+test("callMiniAgentReview: raw texts are redacted before surfacing parse failures", async () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-review-log-"));
+  const token = "eyJabcdefghijklmnopqrstuvwxyz1234567890";
+  const { binPath } = mkStatefulMockForReview({
+    logDir,
+    steps: [
+      { content: `bad ${token}`, finishReason: "stop" },
+      { content: "still bad", finishReason: "stop" },
+    ],
+  });
+
+  const r = await callMiniAgentReview({
+    context: "diff",
+    focus: "",
+    schemaPath: SCHEMA_PATH,
+    cwd: process.cwd(),
+    timeout: 5_000,
+    bin: binPath,
+    logDir,
+  });
+
+  assert.equal(r.ok, false);
+  assert.match(r.firstRawText, /eyJ\*\*\*REDACTED\*\*\*/);
+  assert.ok(!r.firstRawText.includes(token), "original JWT-like token must be redacted");
+});
+
+test("callMiniAgentReview: retry transport failure returns retry_used=true with diagnostic", async () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "minimax-review-log-"));
+  const { binPath } = mkStatefulMockForReview({
+    logDir,
+    steps: [
+      { content: "not valid json", finishReason: "stop", removeSelf: true },
+    ],
+  });
+
+  const r = await callMiniAgentReview({
+    context: "diff",
+    focus: "",
+    schemaPath: SCHEMA_PATH,
+    cwd: process.cwd(),
+    timeout: 5_000,
+    bin: binPath,
+    logDir,
+  });
+
+  assert.equal(r.ok, false);
+  assert.equal(r.retry_used, true);
+  assert.equal(r.retriedOnce, true);
+  assert.equal(r.diagnostic?.status, "not-installed");
+});
