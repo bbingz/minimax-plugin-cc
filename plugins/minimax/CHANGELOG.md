@@ -1,5 +1,31 @@
 # minimax plugin CHANGELOG
 
+## 2026-04-21 — Phase 4
+
+- Add /minimax:rescue / :status / :result / :cancel / :task-resume-candidate commands.
+- Add lib/job-control.mjs: createJob / readJob / updateJobMeta / listJobs /
+  filterJobsBySession / cancelJob + serial-queue acquireQueueSlot /
+  releaseQueueSlot (directory-based lock with atomic rename-reclaim).
+- Add internal _worker subcommand for detached background execution
+  (true try/finally so queue slot always releases).
+- Add minimax-agent subagent (thin-wrapper contract; --sandbox is isolated
+  workdir, NOT a security boundary).
+- Add hooks/hooks.json + session-lifecycle-hook.mjs (dual-protocol env
+  injection: CLAUDE_ENV_FILE + stdout JSON) + stop-review-gate-hook.mjs
+  (default-disabled, --timeout 600000 passthrough to review).
+- Add prompts/stop-review-gate.md (spec §6.6 deliverable; wiring deferred
+  to Phase 5).
+- Add minimax-result-handling references/rescue-render.md (tripwire applies;
+  cross-session visibility note).
+- Retroactive: runAsk (Phase 2) and runReview (Phase 3) now route through
+  acquireQueueSlot so P0.10 single-spawn holds across all commands.
+- v0.1 limitations: task-resume-candidate is informational only; stop-review
+  -gate runs default review prompt; detached workers survive session end;
+  cancelJob kill(pid,0) has pid-reuse gap.
+- Smoke: T6 (background rescue → status → result) + T11 (sandbox mtime
+  invariant + note.txt written into workspace) PASS. Tag `phase-4-rescue`
+  applied.
+
 ## 2026-04-20 — Phase 3
 
 - Add /minimax:review command + companion runReview subcommand.

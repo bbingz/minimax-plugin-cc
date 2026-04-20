@@ -1,4 +1,19 @@
 
+## 2026-04-21 15:10 [Claude sonnet executor] — Phase 4 complete (T6 / T11 PASS)
+
+- **status**: done
+- **scope**: /minimax:rescue + /minimax:status + /minimax:result + /minimax:cancel + /minimax:task-resume-candidate + job-control.mjs (serial queue per P0.10) + minimax-agent subagent + hooks (SessionStart/End + Stop review-gate). Live-verified against Coding Plan endpoint `api.minimaxi.com/anthropic` with model `MiniMax-M2.7-highspeed`.
+- **summary**: job-control data layer (atomic meta.json rewrites; mj-<uuid> ids); directory-based serial queue (mkdirSync atomic primitive + rename-and-rmSync stale reclaim — avoids the TOCTOU race an O_EXCL variant had); cancelJob SIGTERM→SIGKILL with pid-reuse caveat; detached background worker (`_worker` internal subcommand, wrapped in try/finally so queue release is guaranteed); runRescue foreground + --background + --sandbox (isolated workdir, explicitly NOT a security boundary per spec §4.6); status/result/cancel/task-resume-candidate subcommands; 5 command.md files (rescue + result have AskUserQuestion in allowed-tools for tripwire confirmation); minimax-agent thin-wrapper contract; hooks.json + dual-protocol session-lifecycle-hook (appends CLAUDE_ENV_FILE AND emits JSON `{env:{...}}`) + stop-review-gate-hook with --timeout 600000 passthrough; prompts/stop-review-gate.md placeholder; rescue-render skill reference with tripwire-applies directive. T6 + T11 smoke: **PASS** (see doc/smoke/phase-4-T6-T11.md).
+- **serial-queue enforcement**: v0.1 permits a single `mini-agent` child at a time (P0.10 conditional hard gate FAILED — concurrent spawn log attribution is unreliable under seconds-precision log-file timestamps). Queue implemented as a *directory lock*: global ~/.claude/plugins/minimax/jobs/.queue-lock/ via mkdirSync + owner.json inside; stale reclaim via atomic renameSync + rmSync. **Retroactively applied**: Phase 2 /minimax:ask and Phase 3 /minimax:review were re-wired to also route through the queue (Task 4.0). New rescue/ask/review calls block up to 5 min waiting for the slot. v0.2 will revisit once Mini-Agent upstream injects job-ids into log file names.
+- **spec §6.5 extension**: plan registers `SessionStart` in addition to the spec-listed `SessionEnd + Stop`. SessionStart injects `MINIMAX_COMPANION_SESSION_ID`. Intentional extension — env injection must occur at session start.
+- **v0.1 limitations made explicit**:
+  - `task-resume-candidate` command lists recent log files but cannot actually resume a prior Mini-Agent session (P0.9 — no external session id).
+  - Detached `_worker` continues running after a Claude Code session ends; the job is visible in a new session via `/minimax:status --all` (sessionId filter won't match the new session's random id).
+  - `stop-review-gate-hook` in Phase 4 runs the default review prompt; `prompts/stop-review-gate.md` is a spec §6.6 deliverable whose wiring is deferred to Phase 5.
+  - `cancelJob`'s `kill(pid,0)` check cannot distinguish the real worker from a reused pid (documented in JSDoc).
+- **3-way review outcome**: pre-implementation review (Codex / Gemini / Claude) surfaced 6 Critical + 5 Important + 4 Minor issues; all were folded into plan v2 before any code landed. No post-implementation spec/quality review rounds needed — direct implementation by controller following the v2 plan.
+- **next**: Phase 5 plan (/minimax:adversarial-review + 3 skill 定稿 + lessons.md 收尾).
+
 ## 2026-04-20 22:40 [Claude sonnet executor] — Phase 3 complete (T5 PASS)
 
 - **status**: done
