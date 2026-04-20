@@ -269,3 +269,13 @@ test("classifyMiniAgentResult: diagnostic bundle includes stderr head+tail (ANSI
   assert.ok(r.diagnostic.stderrHeadTail.includes("line1"));
   assert.ok(r.diagnostic.stderrHeadTail.includes("tail line"));
 });
+
+test("classifyMiniAgentResult: spawn-failed for non-ENOENT spawnError", () => {
+  const r = classifyMiniAgentResult({
+    rawStdout: "", rawStderr: "", exitCode: null, signal: null,
+    spawnError: Object.assign(new Error("spawn mini-agent EACCES"), { code: "EACCES" }),
+    timedOut: false, logPath: null, logParse: null,
+  });
+  assert.equal(r.status, "spawn-failed");
+  assert.ok(r.detail && r.detail.includes("EACCES"), `expected detail to include EACCES, got: ${r.detail}`);
+});
