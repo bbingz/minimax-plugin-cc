@@ -1118,6 +1118,17 @@ export function buildReviewPrompt({ schemaPath, focus, context, retryHint, previ
     .replace("{{FOCUS}}", focusRendered)
     .replace("{{CONTEXT}}", context)
     .replace("{{RETRY_HINT}}", retryBlock);
+
+  // Defensive assertion (code-review Important): String.prototype.replace only
+  // replaces the first match. If any substitution value contained a literal
+  // {{X}}, a later placeholder could be shadowed inside the injected content
+  // instead of filled in the template slot — producing a silently broken prompt.
+  // Fail loud instead.
+  const leftover = result.match(/\{\{[A-Z_]+\}\}/);
+  if (leftover) {
+    throw new Error(`buildReviewPrompt: unreplaced placeholder ${leftover[0]} remains after substitution`);
+  }
+
   return result.trimEnd();
 }
 

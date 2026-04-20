@@ -251,3 +251,18 @@ test("buildReviewPrompt: no previousRaw means no 'Previous response' heading (v2
   assert.ok(prompt.includes("# Retry note"));
   assert.ok(!prompt.includes("## Previous response"));
 });
+
+test("buildReviewPrompt: throws when a substitution value injects an earlier-unused placeholder (code-review Important)", () => {
+  // Simulate the degenerate case where focus happens to contain '{{CONTEXT}}'.
+  // With single-hit .replace() and substitution order SCHEMA→FOCUS→CONTEXT→RETRY,
+  // the {{CONTEXT}} inside focus would be replaced, and the template's real
+  // {{CONTEXT}} slot would remain unfilled. We now detect that and throw.
+  assert.throws(
+    () => buildReviewPrompt({
+      schemaPath: SCHEMA_PATH,
+      focus: "please review {{CONTEXT}} carefully",
+      context: "diff",
+    }),
+    /unreplaced placeholder .*CONTEXT/
+  );
+});
