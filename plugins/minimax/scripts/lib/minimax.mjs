@@ -295,15 +295,25 @@ export async function writeMiniAgentApiKey(newKey) {
 /**
  * @param {string} bin
  * @param {string[]} args
- * @param {{timeoutMs?: number, cwd?: string, env?: object}} options
- * @returns {Promise<{exitCode: number|null, signal: string|null, stdout: string, stderr: string, timedOut: boolean, spawnError: Error|null}>}
+ * @param {{timeoutMs?: number, cwd?: string, env?: object, onStdoutLine?: (line: string) => void, maxStdoutBytes?: number, maxStderrBytes?: number}} options
+ * @returns {Promise<{exitCode: number|null, signal: string|null, stdout: string, stderr: string, stdoutTruncated: boolean, stderrTruncated: boolean, timedOut: boolean, spawnError: Error|null}>}
  */
 export function spawnWithHardTimeout(bin, args, options = {}) {
-  const { timeoutMs = DEFAULT_TIMEOUT_MS, cwd, env } = options;
+  const {
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    cwd,
+    env,
+    onStdoutLine,
+    maxStdoutBytes = 1_048_576, // 1 MiB default (spec §3.3)
+    maxStderrBytes = 65_536,    //  64 KiB default (spec §3.3)
+  } = options;
 
   return new Promise((resolve) => {
     let stdoutBuf = "";
     let stderrBuf = "";
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
+    let lineCarry = "";
     let settled = false;
     let didTimeout = false;
     let termTimer, killTimer;
@@ -313,11 +323,18 @@ export function spawnWithHardTimeout(bin, args, options = {}) {
       settled = true;
       clearTimeout(termTimer);
       clearTimeout(killTimer);
+      // flush trailing line carry (no trailing \n but still a line from consumer POV)
+      if (typeof onStdoutLine === "function" && lineCarry.length > 0) {
+        try { onStdoutLine(lineCarry); } catch {}
+        lineCarry = "";
+      }
       resolve({
-        exitCode: proc.exitCode ?? null,
-        signal: proc.signalCode ?? null,
+        exitCode: proc?.exitCode ?? null,
+        signal: proc?.signalCode ?? null,
         stdout: stdoutBuf,
         stderr: stderrBuf,
+        stdoutTruncated,
+        stderrTruncated,
         timedOut: didTimeout,
         spawnError: null,
         ...extras,
@@ -336,6 +353,7 @@ export function spawnWithHardTimeout(bin, args, options = {}) {
       clearTimeout(killTimer);
       return resolve({
         exitCode: null, signal: null, stdout: "", stderr: "",
+        stdoutTruncated: false, stderrTruncated: false,
         timedOut: false, spawnError,
       });
     }
@@ -348,22 +366,58 @@ export function spawnWithHardTimeout(bin, args, options = {}) {
       proc.stdout?.removeAllListeners();
       proc.stderr?.removeAllListeners();
       proc.removeAllListeners("close");
-      resolve({ exitCode: null, signal: null, stdout: stdoutBuf, stderr: stderrBuf, timedOut: false, spawnError: err });
+      resolve({
+        exitCode: null, signal: null,
+        stdout: stdoutBuf, stderr: stderrBuf,
+        stdoutTruncated, stderrTruncated,
+        timedOut: false, spawnError: err,
+      });
     });
 
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
 
-    proc.stdout.on("data", (chunk) => { stdoutBuf += stdoutDecoder.write(chunk); });
-    proc.stderr.on("data", (chunk) => { stderrBuf += stderrDecoder.write(chunk); });
+    proc.stdout.on("data", (chunk) => {
+      const decoded = stdoutDecoder.write(chunk);
+      if (!decoded) return;
+      if (typeof onStdoutLine === "function") {
+        lineCarry += decoded;
+        let idx;
+        while ((idx = lineCarry.indexOf("\n")) !== -1) {
+          const line = lineCarry.slice(0, idx);
+          lineCarry = lineCarry.slice(idx + 1);
+          try { onStdoutLine(line); } catch {}
+        }
+      }
+      const combined = stdoutBuf + decoded;
+      if (combined.length > maxStdoutBytes) {
+        stdoutBuf = combined.slice(combined.length - maxStdoutBytes);
+        stdoutTruncated = true;
+      } else {
+        stdoutBuf = combined;
+      }
+    });
 
+    proc.stderr.on("data", (chunk) => {
+      const decoded = stderrDecoder.write(chunk);
+      if (!decoded) return;
+      const combined = stderrBuf + decoded;
+      if (combined.length > maxStderrBytes) {
+        stderrBuf = combined.slice(combined.length - maxStderrBytes);
+        stderrTruncated = true;
+      } else {
+        stderrBuf = combined;
+      }
+    });
+
+    // spec §3.3: complete on 'close' (full stdio drain), not 'exit'
     proc.once("close", () => {
       stdoutBuf += stdoutDecoder.end();
       stderrBuf += stderrDecoder.end();
       finalize({});
     });
 
-    // 硬超时三段式
+    // Hard timeout: SIGTERM → SIGKILL → 500ms force-resolve
     termTimer = setTimeout(() => {
       if (settled) return;
       didTimeout = true;
@@ -371,7 +425,6 @@ export function spawnWithHardTimeout(bin, args, options = {}) {
       killTimer = setTimeout(() => {
         if (settled) return;
         try { proc.kill("SIGKILL"); } catch {}
-        // 最终兜底：500ms 后若 close 仍未触发，强制 resolve
         setTimeout(() => {
           if (!settled) {
             settled = true;
@@ -379,6 +432,7 @@ export function spawnWithHardTimeout(bin, args, options = {}) {
             resolve({
               exitCode: null, signal: "SIGKILL",
               stdout: stdoutBuf, stderr: stderrBuf,
+              stdoutTruncated, stderrTruncated,
               timedOut: true, spawnError: null,
             });
           }
