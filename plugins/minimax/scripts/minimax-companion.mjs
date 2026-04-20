@@ -36,9 +36,14 @@ Subcommands:
                       4 = llm-call-failed
                       5 = unknown-crashed / success-claimed-but-no-log
 
-  review [--json] [--timeout <ms>] [--cwd <path>] [--base <ref>] [--scope <mode>] [focus]
-                    Review git diff with mini-agent. Auto scope prefers working
-                    tree, then staged, then branch when --base is provided.
+  review [--json] [--base <ref>] [--scope <auto|working-tree|staged|branch>]
+         [--timeout <ms>] [--cwd <path>] [focus ...]
+                    Run a code review against the current git diff. Exit codes:
+                      0 = success (with or without retry)
+                      2 = no diff / no base / bad scope / merge conflict present
+                      4 = mini-agent call failed
+                      5 = parse/validate failed even after 1 retry
+                      6 = git command failed
 `;
 
 function maskApiKey(k) {
