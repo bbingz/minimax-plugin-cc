@@ -107,3 +107,91 @@ export function filterJobsBySession(jobs, sessionId) {
   if (!sessionId) return jobs;
   return jobs.filter(j => j.sessionId === sessionId);
 }
+
+// ── Serial queue (P0.10 conditional-hard-gate FAIL; only one mini-agent
+//     spawn may run at a time in v0.1) ────────────────────────────────────
+//
+// Uses a DIRECTORY as the lock primitive, not a file. fs.mkdirSync is atomic
+// in POSIX (either creates or EEXIST). Stale reclaim: rename the directory
+// aside, then rmSync it. Renaming is atomic even if a racer also tries — the
+// loser gets ENOENT and falls back to the normal retry path.
+
+export function queueLockPath(workspaceRoot) {
+  return path.join(workspaceRoot, ".queue-lock");
+}
+
+function ownerPath(lockDir) {
+  return path.join(lockDir, "owner.json");
+}
+
+function readLockOwner(lockDir) {
+  try {
+    const text = fs.readFileSync(ownerPath(lockDir), "utf8");
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed.pid !== "number" || typeof parsed.token !== "string") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return e.code !== "ESRCH"; }
+}
+
+export async function acquireQueueSlot(workspaceRoot, {
+  pollIntervalMs = 300,
+  maxWaitMs = 5 * 60 * 1000,
+  staleMs = 5 * 60 * 1000,
+} = {}) {
+  fs.mkdirSync(workspaceRoot, { recursive: true });
+  const lockDir = queueLockPath(workspaceRoot);
+  const deadline = Date.now() + maxWaitMs;
+
+  while (true) {
+    try {
+      fs.mkdirSync(lockDir);
+      const token = crypto.randomUUID();
+      const payload = { pid: process.pid, token, mtime: new Date().toISOString() };
+      fs.writeFileSync(ownerPath(lockDir), JSON.stringify(payload), "utf8");
+      return { acquired: true, token };
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      const owner = readLockOwner(lockDir);
+      let shouldReclaim = false;
+      if (!owner) {
+        shouldReclaim = true;
+      } else {
+        const alive = pidAlive(owner.pid);
+        const mtimeMs = Date.parse(owner.mtime || "") || 0;
+        const aged = (Date.now() - mtimeMs) > staleMs;
+        if (!alive || aged) shouldReclaim = true;
+      }
+      if (shouldReclaim) {
+        const stagedPath = lockDir + ".stale." + crypto.randomUUID();
+        try {
+          fs.renameSync(lockDir, stagedPath);
+          fs.rmSync(stagedPath, { recursive: true, force: true });
+        } catch (e) {
+          // ENOENT => another racer already moved it; fall through to next iteration
+          if (e.code !== "ENOENT") { /* swallow; retry */ }
+        }
+        continue;
+      }
+    }
+
+    if (Date.now() >= deadline) {
+      return { acquired: false, reason: "queue-timeout" };
+    }
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+  }
+}
+
+export function releaseQueueSlot(workspaceRoot, token) {
+  const lockDir = queueLockPath(workspaceRoot);
+  const owner = readLockOwner(lockDir);
+  if (!owner) return;
+  if (owner.token !== token) return;
+  try { fs.rmSync(lockDir, { recursive: true, force: true }); } catch {}
+}

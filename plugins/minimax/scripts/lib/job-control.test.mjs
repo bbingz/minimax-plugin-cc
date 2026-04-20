@@ -95,3 +95,63 @@ test("updateJobMeta: rejects unknown status but accepts known ones", async () =>
     /invalid status/
   );
 });
+
+// ── Task 4.2: serial queue ──────────────────────────────────────────────
+
+import { acquireQueueSlot, releaseQueueSlot, queueLockPath } from "./job-control.mjs";
+
+test("acquireQueueSlot: acquires when no prior lock; releaseQueueSlot removes it", async () => {
+  const root = mkWorkspaceRoot();
+  const slot = await acquireQueueSlot(root, { pollIntervalMs: 50, maxWaitMs: 2000 });
+  assert.ok(slot.acquired, `should acquire; reason=${slot.reason}`);
+  assert.equal(fs.existsSync(queueLockPath(root)), true);
+  releaseQueueSlot(root, slot.token);
+  assert.equal(fs.existsSync(queueLockPath(root)), false);
+});
+
+test("acquireQueueSlot: blocks if another lock is held by live PID", async () => {
+  const root = mkWorkspaceRoot();
+  const slot1 = await acquireQueueSlot(root, { pollIntervalMs: 50, maxWaitMs: 2000 });
+  assert.ok(slot1.acquired);
+  const t0 = Date.now();
+  const slot2 = await acquireQueueSlot(root, { pollIntervalMs: 50, maxWaitMs: 500 });
+  const dt = Date.now() - t0;
+  assert.equal(slot2.acquired, false);
+  assert.equal(slot2.reason, "queue-timeout");
+  assert.ok(dt >= 400, `should have waited ~500ms, took ${dt}ms`);
+  releaseQueueSlot(root, slot1.token);
+});
+
+test("acquireQueueSlot: reclaims stale lock (dead PID)", async () => {
+  const root = mkWorkspaceRoot();
+  fs.mkdirSync(root, { recursive: true });
+  // Fabricate stale directory-lock: mkdir + owner.json with a dead PID
+  const stagedDir = queueLockPath(root);
+  fs.mkdirSync(stagedDir, { recursive: true });
+  fs.writeFileSync(path.join(stagedDir, "owner.json"),
+    JSON.stringify({ pid: 999999, token: "stale", mtime: new Date().toISOString() }));
+  const slot = await acquireQueueSlot(root, { pollIntervalMs: 50, maxWaitMs: 2000 });
+  assert.ok(slot.acquired, `stale reclaim; reason=${slot.reason}`);
+  releaseQueueSlot(root, slot.token);
+});
+
+test("acquireQueueSlot: reclaims stale lock (mtime > staleMs)", async () => {
+  const root = mkWorkspaceRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const stagedDir = queueLockPath(root);
+  fs.mkdirSync(stagedDir, { recursive: true });
+  const oldTime = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  fs.writeFileSync(path.join(stagedDir, "owner.json"),
+    JSON.stringify({ pid: process.pid, token: "aged", mtime: oldTime }));
+  const slot = await acquireQueueSlot(root, { pollIntervalMs: 50, maxWaitMs: 2000, staleMs: 60_000 });
+  assert.ok(slot.acquired);
+  releaseQueueSlot(root, slot.token);
+});
+
+test("releaseQueueSlot: unknown token leaves lock alone (defensive)", async () => {
+  const root = mkWorkspaceRoot();
+  const slot = await acquireQueueSlot(root, { pollIntervalMs: 50, maxWaitMs: 2000 });
+  releaseQueueSlot(root, "wrong-token");
+  assert.equal(fs.existsSync(queueLockPath(root)), true, "wrong token must not release");
+  releaseQueueSlot(root, slot.token);
+});
