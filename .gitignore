@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+/tmp/
+/plugins/minimax/scripts/*.tmp
+/plugins/minimax/scripts/*.bak
+**/.lock
