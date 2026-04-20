@@ -7,6 +7,8 @@ import {
   readMiniAgentConfig,
   writeMiniAgentApiKey,
   redactSecrets,
+  callMiniAgent,
+  classifyMiniAgentResult,
 } from "./lib/minimax.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
 
@@ -15,15 +17,19 @@ const USAGE = `Usage: minimax-companion <subcommand> [options]
 Subcommands:
   setup [--json] [--enable-review-gate|--disable-review-gate]
                     Check mini-agent CLI availability and auth state.
-                    In interactive Claude Code flow, this may prompt (via AskUserQuestion)
-                    for API key and api_base region if missing.
 
   write-key --api-key <key> [--api-base <url>] [--json]
-                    Write api_key (and optionally api_base) into config.yaml with
-                    hardened gate + atomic write + stale-lock recovery.
-                    Returns { ok, reason?, form?, lineNumber? }.
+                    Write api_key (and optionally api_base) into config.yaml.
 
-(More subcommands arrive in Phase 2+.)
+  ask [--json] [--timeout <ms>] [--cwd <path>] "<prompt>"
+                    One-shot question via mini-agent -t. Streams stdout live
+                    (ANSI-stripped) to main stdout. On success returns response
+                    (text or JSON). Exit codes:
+                      0 = success / success-but-truncated
+                      2 = incomplete (tool_calls unresolved)
+                      3 = auth/config/socksio/not-installed
+                      4 = llm-call-failed
+                      5 = unknown-crashed / success-claimed-but-no-log
 `;
 
 function maskApiKey(k) {
@@ -119,6 +125,98 @@ async function runWriteKey(rawArgs) {
   process.exit(result.ok ? 0 : 2);
 }
 
+const STATUS_EXIT_CODE = {
+  "success": 0,
+  "success-but-truncated": 0,
+  "incomplete": 2,
+  "auth-not-configured": 3,
+  "config-missing": 3,
+  "needs-socksio": 3,
+  "not-installed": 3,
+  "spawn-failed": 5,
+  "llm-call-failed": 4,
+  "unknown-crashed": 5,
+  "success-claimed-but-no-log": 5,
+};
+
+function stripAnsi(s) {
+  return String(s).replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+async function runAsk(rawArgs) {
+  const { options, positionals } = parseArgs(rawArgs, {
+    booleanOptions: ["json"],
+    valueOptions: ["timeout", "cwd"],
+  });
+
+  const prompt = positionals.join(" ").trim();
+  if (!prompt) {
+    if (options.json) process.stdout.write(JSON.stringify({ status: "bad-input", reason: "prompt is empty" }) + "\n");
+    else process.stderr.write("Error: prompt is required\n");
+    process.exit(1);
+  }
+
+  const timeout = options.timeout ? Number(options.timeout) : 120_000;
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    process.stderr.write(`Error: invalid --timeout '${options.timeout}'\n`);
+    process.exit(1);
+  }
+
+  const cwd = options.cwd || process.cwd();
+
+  // T3: immediate "not frozen" signal for text mode (JSON mode must not pollute stdout).
+  if (!options.json) {
+    process.stdout.write("Starting MiniMax (cold start ~3s)...\n");
+  }
+
+  const onProgressLine = (line) => {
+    if (options.json) return;
+    process.stdout.write(stripAnsi(line) + "\n");
+  };
+
+  const result = await callMiniAgent({ prompt, cwd, timeout, onProgressLine });
+  const cls = classifyMiniAgentResult(result);
+
+  const exitCode = STATUS_EXIT_CODE[cls.status] ?? 5;
+
+  if (options.json) {
+    const payload = (cls.status === "success" || cls.status === "success-but-truncated")
+      ? {
+          status: cls.status,
+          response: cls.response,
+          toolCalls: cls.toolCalls,
+          finishReason: cls.finishReason,
+          logPath: cls.logPath,
+          thinking: cls.thinking,
+        }
+      : {
+          status: cls.status,
+          reason: cls.reason ?? null,
+          detail: cls.detail ?? null,
+          logPath: cls.logPath ?? null,
+          diagnostic: cls.diagnostic ?? null,
+        };
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+  } else if (cls.status === "success" || cls.status === "success-but-truncated") {
+    const cfg = readMiniAgentConfig();
+    process.stdout.write("\n---\n" + cls.response + "\n");
+    const footerParts = [];
+    if (cfg.model) footerParts.push(`model: ${cfg.model}`);
+    if (cls.logPath) footerParts.push(`log: ${cls.logPath}`);
+    if (cls.status === "success-but-truncated") footerParts.push("truncated");
+    if (footerParts.length) process.stdout.write(`(${footerParts.join(" · ")})\n`);
+  } else {
+    process.stderr.write(`Error: ${cls.status}${cls.detail ? " — " + cls.detail : ""}\n`);
+    if (cls.diagnostic && cls.diagnostic.stderrHeadTail && cls.diagnostic.stderrHeadTail.trim()) {
+      process.stderr.write("\n--- diagnostic (stderr head+tail, ANSI stripped) ---\n");
+      process.stderr.write(cls.diagnostic.stderrHeadTail + "\n");
+    }
+    if (cls.logPath) process.stderr.write(`log: ${cls.logPath}\n`);
+  }
+
+  process.exit(exitCode);
+}
+
 async function main() {
   const argv = process.argv.slice(2);
 
@@ -132,6 +230,8 @@ async function main() {
       return await runSetup(rest);
     case "write-key":
       return await runWriteKey(rest);
+    case "ask":
+      return await runAsk(rest);
     case undefined:
     case "--help":
     case "-h":
