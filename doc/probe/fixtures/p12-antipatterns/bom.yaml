@@ -1,0 +1,4 @@
+﻿api_key: "normal-key"
+api_base: "https://api.minimax.io"
+model: "MiniMax-M2.5"
+provider: "anthropic"

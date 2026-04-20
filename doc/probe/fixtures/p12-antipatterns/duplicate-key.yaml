@@ -1,0 +1,5 @@
+api_key: "first-key"
+api_key: "second-key-wins-in-safeload"
+api_base: "https://api.minimax.io"
+model: "MiniMax-M2.5"
+provider: "anthropic"

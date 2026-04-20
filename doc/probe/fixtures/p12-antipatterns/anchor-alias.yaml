@@ -1,0 +1,6 @@
+defaults: &defaults
+  k: "shared-key-via-anchor"
+api_key: *defaults
+api_base: "https://api.minimax.io"
+model: "MiniMax-M2.5"
+provider: "anthropic"
