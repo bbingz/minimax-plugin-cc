@@ -1,5 +1,14 @@
 # minimax plugin CHANGELOG
 
+## 2026-04-22 — v0.1.2 (review hardening + release)
+
+- **Critical**: switch `buildReviewPrompt` + `buildAdversarialPrompt` placeholder substitution to callback-form `.replace(pat, () => value)` so JS does not interpret `$&` / `$$` / `$1-$9` inside user-derived content.
+- **High**: add `buildReviewPrompt` regression coverage for M2 sentinel behavior and replacement-token survival.
+- **High**: `/minimax:adversarial-review` defaults to `--json`, preserving the red block when blue fails.
+- **High**: adversarial mock tests no longer rely on `process.env.MOCK_*`; per-instance config is passed via generated-script literals/argv.
+- **High**: `extractReviewJson` ignores stray leading `}` and can recover to a later valid JSON object while preserving malformed-candidate parse errors.
+- **Tests**: 86 pass / 0 fail.
+
 ## 2026-04-21 — v0.1.1 (Phase 5 follow-up patch)
 
 - **M5**: `_callReviewLike` short-circuits when first-shot is `truncated && !extracted.ok` — retry would identically truncate, no point wasting another spawn + queue slot. New error code: `truncated-and-unparseable`.

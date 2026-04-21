@@ -1,6 +1,6 @@
 {
   "name": "minimax",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Use MiniMax (via Mini-Agent) from Claude Code.",
   "author": { "name": "bing" }
 }

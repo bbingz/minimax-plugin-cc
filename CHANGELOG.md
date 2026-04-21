@@ -1,4 +1,17 @@
 
+## 2026-04-22 04:30 [Claude opus controller] — v0.1.2 patch — review fixes + release prep
+
+- **status**: done
+- **scope**: prompt-substitution hardening, review/adversarial regression coverage, command default fix, test-mock isolation fix, `extractReviewJson` recovery fix, version bump 0.1.1 → 0.1.2
+- **summary**:
+  - **Critical (Gemini)**: `buildReviewPrompt` + `buildAdversarialPrompt` now use callback-form `.replace(pat, () => value)` for all user-derived substitutions, so `$&` / `$$` / `$1-$9` inside focus / retryHint / context are preserved verbatim instead of being interpreted by JS replacement semantics.
+  - **High (mirror coverage)**: added `buildReviewPrompt` regression tests for both M2 sentinel behavior and replacement-token survival; existing adversarial-path regression retained.
+  - **High (Codex)**: `/minimax:adversarial-review` default command now passes `--json`, preserving the red block when blue fails and aligning with the render reference.
+  - **High (Qwen + Gemini + MiniMax)**: `minimax-adversarial.test.mjs` no longer uses `process.env.MOCK_*`; per-fake-bin trace path and finish reason are baked into the generated helper invocation, removing shared mutable test state.
+  - **High (Gemini)**: `extractReviewJson` now ignores stray leading `}` and keeps scanning for a later valid object, while still returning `raw-parse-failed` when only malformed candidates exist.
+- **tests**: `node --test plugins/minimax/scripts/lib/*.test.mjs` → 86 pass / 0 fail.
+- **next**: tag `v0.1.2`, push, GitHub Release, then land Gemini alignment response in `PROGRESS.md`.
+
 ## 2026-04-21 19:30 [Claude opus controller] — v0.1.1 patch — minimax-agent self-review findings landed
 
 - **status**: done
