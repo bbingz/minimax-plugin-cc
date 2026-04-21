@@ -1289,6 +1289,7 @@ export function extractReviewJson(raw) {
   let start = -1;
   let inString = false;
   let escape = false;
+  let lastParseError = null;
   for (let i = 0; i < trimmed.length; i++) {
     const ch = trimmed[i];
     if (inString) {
@@ -1304,18 +1305,28 @@ export function extractReviewJson(raw) {
       continue;
     }
     if (ch === "}") {
-      depth--;
-      if (depth === 0 && start !== -1) {
-        const candidate = trimmed.slice(start, i + 1);
-        try {
-          return { ok: true, data: JSON.parse(candidate) };
-        } catch (e) {
-          return { ok: false, error: "raw-parse-failed", parseError: e.message };
+      // v0.1.2 (Gemini High): ignore stray } before any { so the scanner can
+      // still recover and find a later valid JSON object.
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start !== -1) {
+          const candidate = trimmed.slice(start, i + 1);
+          try {
+            return { ok: true, data: JSON.parse(candidate) };
+          } catch (e) {
+            // Candidate looked like a full object but was not valid JSON.
+            // Keep scanning for a later complete object instead of bailing out.
+            lastParseError = e.message;
+            start = -1;
+          }
         }
       }
     }
   }
 
+  if (lastParseError) {
+    return { ok: false, error: "raw-parse-failed", parseError: lastParseError };
+  }
   return { ok: false, error: "no-json-found" };
 }
 

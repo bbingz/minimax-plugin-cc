@@ -228,6 +228,13 @@ test("extractReviewJson: two JSON objects in a row — returns the first complet
   assert.equal(r.data.thinking, "let me review", "brace-balanced scan returns FIRST complete object");
 });
 
+test("extractReviewJson: stray } before { does NOT poison subsequent valid JSON (Gemini v0.1.2)", () => {
+  const raw = 'use the } symbol carefully\n{"verdict":"approve","summary":"ok","findings":[],"next_steps":[]}';
+  const r = extractReviewJson(raw);
+  assert.equal(r.ok, true);
+  assert.equal(r.data.verdict, "approve");
+});
+
 test("buildReviewPrompt: previousRaw injected under heading, redacted, capped at 1500 chars (v2 — Codex #3)", () => {
   const prompt = buildReviewPrompt({
     schemaPath: SCHEMA_PATH,
