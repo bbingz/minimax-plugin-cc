@@ -81,11 +81,16 @@ If companion returns `toolCalls[]` with an unfamiliar `name`, do not guess its m
 
 If the companion returns an error status (non-zero exit), show it directly with context. Do NOT re-run automatically. Use the status -> message map above to choose the right user-facing opener.
 
-## What still needs Phase 3+ work
+## v1 status (Phase 5 complete)
 
-- `references/review-render.md` -- severity-sorted findings, JSON schema validation story (Phase 3)
-- `references/rescue-render.md` -- multi-step progress rendering + sandbox boundary reminder (Phase 4)
-- Token-usage story -- Mini-Agent currently doesn't surface token counts; do not claim costs
+All references in `references/` are populated and reflect Phase 1-5 actual behavior:
+
+- `references/ask-render.md` (Phase 2)
+- `references/review-render.md` (Phase 3)
+- `references/rescue-render.md` (Phase 4)
+- `references/adversarial-review-render.md` (Phase 5)
+
+Token-usage story remains a v0.2 item — Mini-Agent currently doesn't surface token counts; do not claim costs.
 
 ## Non-goals
 

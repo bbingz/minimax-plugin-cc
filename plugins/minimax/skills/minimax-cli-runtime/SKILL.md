@@ -1,6 +1,6 @@
 ---
 name: minimax-cli-runtime
-description: Internal helper contract for calling the minimax-companion runtime from Claude Code. v0.1 — finalized after 13 Phase 0 probes against Mini-Agent 0.1.0.
+description: Internal helper contract for calling the minimax-companion runtime from Claude Code. v1 — finalized after Phase 0-5 (13 probes + ask/review/rescue/adversarial-review live wiring) against Mini-Agent 0.1.0.
 ---
 
 # minimax-cli-runtime
