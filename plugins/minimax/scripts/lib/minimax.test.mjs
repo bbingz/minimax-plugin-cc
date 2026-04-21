@@ -296,6 +296,25 @@ test("buildAdversarialPrompt: previousRaw containing literal {{CONTEXT}} does NO
   assert.ok(!out.includes("__MINIMAX_CONTEXT_SLOT__"), "internal sentinel must not leak");
 });
 
+test("buildAdversarialPrompt: user diff containing $& / $$ / $1 is NOT corrupted (Gemini Critical v0.1.2)", () => {
+  _invalidateAdversarialTemplateCache();
+  // String.prototype.replace(str, str) interprets $& / $$ / $1-$9 in the
+  // replacement string. Diff content with these chars must survive verbatim
+  // into the final prompt.
+  const tricky = "diff --git a/x.js b/x.js\n+const out = str.replace(/foo/, '$& bar');\n+const dbl = '$$';\n+const cap = '$1';\n";
+  const out = buildAdversarialPrompt({
+    stance: "red",
+    schemaPath: ADVERSARIAL_SCHEMA_PATH,
+    focus: "$& tricky focus $$ $1",
+    context: tricky,
+  });
+  assert.ok(out.includes("'$& bar'"), "context $& must survive verbatim");
+  assert.ok(out.includes("'$$'"), "context $$ must survive verbatim");
+  assert.ok(out.includes("'$1'"), "context $1 must survive verbatim");
+  assert.ok(out.includes("$& tricky focus $$ $1"), "focus replacement tokens must survive verbatim");
+  assert.ok(!out.includes("__MINIMAX_CONTEXT_SLOT__"), "sentinel must not leak");
+});
+
 (async () => {
   console.log("# extractLogPathFromStdout");
 

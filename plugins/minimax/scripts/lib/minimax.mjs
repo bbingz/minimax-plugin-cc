@@ -1113,16 +1113,17 @@ export function buildReviewPrompt({ schemaPath, focus, context, retryHint, previ
     retryBlock = lines.join("\n");
   }
 
-  // v2 (C3) + M2 (v0.1.1 follow-up): swap real {{CONTEXT}} slot to a sentinel
-  // BEFORE substituting other placeholders. Isolates user-supplied focus /
-  // retryHint / previousRaw from poisoning the {{CONTEXT}} substitution.
+  // v2 (C3) + M2 (v0.1.1) + Gemini Critical (v0.1.2): swap the real
+  // {{CONTEXT}} slot to a sentinel BEFORE substituting other placeholders, and
+  // use the callback form of .replace() so user-derived strings containing
+  // $& / $$ / $` / $' / $1-$9 survive verbatim.
   const CONTEXT_SENTINEL = " __MINIMAX_CONTEXT_SLOT__ ";
   const EXPECTED_PLACEHOLDERS = ["{{SCHEMA_JSON}}", "{{FOCUS}}", "{{RETRY_HINT}}"];
   let staged = template
-    .replace("{{CONTEXT}}", CONTEXT_SENTINEL)
-    .replace("{{SCHEMA_JSON}}", schemaText)
-    .replace("{{FOCUS}}", focusRendered)
-    .replace("{{RETRY_HINT}}", retryBlock);
+    .replace("{{CONTEXT}}", () => CONTEXT_SENTINEL)
+    .replace("{{SCHEMA_JSON}}", () => schemaText)
+    .replace("{{FOCUS}}", () => focusRendered)
+    .replace("{{RETRY_HINT}}", () => retryBlock);
   for (const p of EXPECTED_PLACEHOLDERS) {
     if (staged.includes(p)) {
       throw new Error(`buildReviewPrompt: placeholder ${p} not substituted (template malformed?)`);
@@ -1131,7 +1132,7 @@ export function buildReviewPrompt({ schemaPath, focus, context, retryHint, previ
   if (!staged.includes(CONTEXT_SENTINEL)) {
     throw new Error("buildReviewPrompt: {{CONTEXT}} placeholder missing from template");
   }
-  const result = staged.replace(CONTEXT_SENTINEL, context);
+  const result = staged.replace(CONTEXT_SENTINEL, () => context);
 
   return result.trimEnd();
 }
@@ -1229,20 +1230,20 @@ export function buildAdversarialPrompt({ stance, schemaPath, focus, context, ret
     retryBlock = lines.join("\n");
   }
 
-  // v2 (C3) + M2 (v0.1.1 follow-up): swap the real {{CONTEXT}} slot to a
-  // null-byte sentinel BEFORE substituting any other placeholder. This isolates
-  // user-supplied content (focus / retryHint / previousRaw) from being able to
-  // poison the {{CONTEXT}} substitution via first-match shadowing or misleading
-  // "missing from template" errors when previousRaw legitimately contains the
-  // literal string "{{CONTEXT}}".
+  // v2 (C3) + M2 (v0.1.1) + Gemini Critical (v0.1.2): swap the real
+  // {{CONTEXT}} slot to a sentinel BEFORE substituting any other placeholder.
+  // This isolates user-supplied content (focus / retryHint / previousRaw) from
+  // poisoning the {{CONTEXT}} substitution, and the callback form of .replace()
+  // disables JS replacement-token interpretation for $& / $$ / $` / $' / $1-$9
+  // inside user-derived strings.
   const CONTEXT_SENTINEL = " __MINIMAX_CONTEXT_SLOT__ ";
   const EXPECTED_PLACEHOLDERS = ["{{STANCE_INSTRUCTION}}", "{{SCHEMA_JSON}}", "{{FOCUS}}", "{{RETRY_HINT}}"];
   let staged = template
-    .replace("{{CONTEXT}}", CONTEXT_SENTINEL)
-    .replace("{{STANCE_INSTRUCTION}}", stanceInstruction)
-    .replace("{{SCHEMA_JSON}}", schemaText)
-    .replace("{{FOCUS}}", focusRendered)
-    .replace("{{RETRY_HINT}}", retryBlock);
+    .replace("{{CONTEXT}}", () => CONTEXT_SENTINEL)
+    .replace("{{STANCE_INSTRUCTION}}", () => stanceInstruction)
+    .replace("{{SCHEMA_JSON}}", () => schemaText)
+    .replace("{{FOCUS}}", () => focusRendered)
+    .replace("{{RETRY_HINT}}", () => retryBlock);
   for (const p of EXPECTED_PLACEHOLDERS) {
     if (staged.includes(p)) {
       throw new Error(`buildAdversarialPrompt: placeholder ${p} not substituted (template malformed?)`);
@@ -1251,7 +1252,7 @@ export function buildAdversarialPrompt({ stance, schemaPath, focus, context, ret
   if (!staged.includes(CONTEXT_SENTINEL)) {
     throw new Error("buildAdversarialPrompt: {{CONTEXT}} placeholder missing from template");
   }
-  const result = staged.replace(CONTEXT_SENTINEL, context);
+  const result = staged.replace(CONTEXT_SENTINEL, () => context);
 
   return result.trimEnd();
 }
