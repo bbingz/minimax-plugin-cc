@@ -2,6 +2,7 @@ node_modules/
 *.log
 .DS_Store
 /tmp/
+.claude/
 /plugins/minimax/scripts/*.tmp
 /plugins/minimax/scripts/*.bak
 **/.lock

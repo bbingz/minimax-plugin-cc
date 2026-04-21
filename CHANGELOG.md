@@ -1,4 +1,12 @@
 
+## 2026-04-21 16:30 [Claude opus controller] — Phase 5 plan v2 locked (5-way review complete; ready for cloud execution)
+
+- **status**: handed-off-to-cloud-executor
+- **scope**: docs/superpowers/plans/2026-04-21-phase-5-adversarial.md (2393 lines, 13 tasks); docs/superpowers/plans/2026-04-21-phase-4-rescue.md (Phase 4 historical plan committed for completeness); .gitignore += .claude/
+- **summary**: Phase 5 plan drafted (`/minimax:adversarial-review` dual-spawn red+blue under one queue slot, reuse review-output.schema.json, no new schema). Architectural decisions D5.1 (双 spawn) / D5.2 (single prompt + stance constants) / D5.3 (queue slot integral hold) registered. **5-way review** (Codex + Gemini + Claude-opus + Kimi + Qwen) returned 7 Critical + 21 Important + 14 Minor; all-but-3 嵌入 v2 (M5/M10 reject after deliberation; **C2 dissent** Codex-strict vs Kimi-lenient on T9 — selected Kimi's lenient interpretation: schema-valid output with at least one viewpoint having non-empty findings = T9 PASS; rationale登记 in plan v2 revision index + lessons.md §G plan). v2 patches were targeted Edit calls (preserving v1 history per memory `feedback-3way-review`). Plan ready for inline controller execution.
+- **process upgrade**: 3-way → 5-way review pattern validated. Non-overlapping coverage observed: Qwen alone caught template-literal injection (mock test), Kimi alone caught command-vs-render column-name mismatch (C6), Gemini alone caught placeholder-regex-misfires-on-user-diff (C3), Claude-opus + Codex co-caught stance-quote-syntax-error (C1). Memory `feedback-3way-review.md` updated to N-way default (3-way for routine; 5-way for ship-bar phases).
+- **next**: cloud session pulls this commit, reads project-phase-status.md memory + plan v2, executes Tasks 5.0–5.12 sequentially (per executing-plans skill, NOT subagent-dispatch — `feedback-direct-impl-when-plan-tight` applies). T9 smoke (Task 5.10) is the only step needing real LLM call. Tag v0.1.0 at Task 5.12 ships v0.1.
+
 ## 2026-04-21 15:10 [Claude sonnet executor] — Phase 4 complete (T6 / T11 PASS)
 
 - **status**: done
