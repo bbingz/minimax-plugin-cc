@@ -1,4 +1,13 @@
 
+## 2026-04-21 18:50 [Claude opus controller] — Phase 5 done (T9 PASS, ready to tag v0.1.0)
+
+- **status**: done
+- **scope**: Phase 5 — `/minimax:adversarial-review` (red+blue dual spawn) + 三 skill v1 (cli-runtime / prompting / result-handling) + lessons.md §A-§G + T9 PASS。13 tasks committed individually 5.0→5.10。
+- **summary**: D5.1 双 spawn (sequential under one queue slot); D5.2 single prompt + `{{STANCE_INSTRUCTION}}` + module constants `RED_STANCE_INSTRUCTION` / `BLUE_STANCE_INSTRUCTION`; D5.3 queue slot integral hold across red+blue+retries (maxWaitMs = timeout*4 + 30s)。`_callReviewLike` extracted as zero-behavior-change refactor (Task 5.0); `callMiniAgentAdversarial` reuses it twice with errorPrefix="prompt-build-failed" (I1)。C3 follow-on: `buildReviewPrompt` leftover guard 同步改白名单 set（latent bug 顺手修）。3 skill 全部 v1 定稿；C7 把 cli-runtime 历史段移到 lessons.md §D。lessons.md 含 12 坑 + Phase 4-5 实现要点 + 5-way review 修订表 (M13)。T9 smoke: 红 needs-attention (2 critical) vs 蓝 approve (1 low) — effective disagreement, 0 retry, 41s elapsed (under 50-90s estimate)。tests: 82 pass / 0 fail (was 79 + 3 adversarial mock tests; minimax.test.mjs internal 50 (was 45) + 5 buildAdversarialPrompt unit tests)。
+- **5-way review revisions**: 7 Critical (C1 Chinese 「」 quotes / C2 dissent T9 lenient / C3 placeholder whitelist / C4 Chinese retry hint / C5 4-tick fences / C6 column labels / C7 SKILL no history) + 21 Important + 14 Minor — all but M5/M10 (rejected after deliberation) embedded in v2 plan and shipped.
+- **I9 observation**: T9 fixture red 100% critical (2/2) but findings are well-grounded technical bugs (network → TypeError, HTTP error → silent JSON), confidence 0.95; **not** stance-language hallucination. Sample (n=2) too small; stance softening pre-plan NOT triggered. Recorded in lessons.md 坑 11 延伸.
+- **next**: Tag v0.1.0 (Task 5.12). v0.2 路线见 spec §8.5。
+
 ## 2026-04-21 16:30 [Claude opus controller] — Phase 5 plan v2 locked (5-way review complete; ready for cloud execution)
 
 - **status**: handed-off-to-cloud-executor

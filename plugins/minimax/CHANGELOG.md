@@ -1,5 +1,37 @@
 # minimax plugin CHANGELOG
 
+## 2026-04-21 — Phase 5
+
+- Add /minimax:adversarial-review command (red team + blue team dual stance).
+- Add prompts/adversarial-review.md (single template, {{STANCE_INSTRUCTION}}
+  switches stance; Chinese-direct M2.7 idiom).
+- Add lib/minimax.mjs::_callReviewLike (zero-behavior-change refactor of
+  callMiniAgentReview's single-spawn + 1-shot retry skeleton).
+- Add lib/minimax.mjs::callMiniAgentAdversarial (sequential red→blue, both
+  must succeed; errorPrefix="prompt-build-failed" per I1; no "red-team failed:"
+  prefix per I5; stance-prefixed onProgressLine wrapper).
+- Add RED_STANCE_INSTRUCTION / BLUE_STANCE_INSTRUCTION module constants
+  (Chinese 「」 internal quotes per C1; blue mitigation-gap focus per I10;
+  blue severity calibration per M9).
+- Add buildAdversarialPrompt with whitelist leftover guard (C3) + Chinese
+  retry hint (C4); same C3 guard pattern back-applied to buildReviewPrompt.
+- Add minimax-companion.mjs::runAdversarialReview subcommand: single
+  acquireQueueSlot held across both spawns (D5.3); maxWaitMs = timeout*4 + 30s;
+  stdout queue-hold notice per I15; pickViewpointPayload + renderViewpointText
+  helpers; text mode renders === Red Team === then === Blue Team === blocks.
+- Bump skills to v1: minimax-cli-runtime frontmatter; minimax-prompting SKILL
+  finalized (drop "skeleton") + 3 references (recipes / antipatterns /
+  prompt-blocks); minimax-result-handling adds adversarial-review-render
+  reference, drops "What still needs Phase 3+ work" → "v1 status".
+- C7: skip appending Phase 4-5 deltas to cli-runtime SKILL.md (LLM context
+  consumed; history goes to lessons.md §D instead).
+- Tests: +5 buildAdversarialPrompt unit tests (red / blue / unknown-stance /
+  retry-redaction / C3 regression); +3 callMiniAgentAdversarial mock tests
+  (both-succeed / red-fail-no-blue-spawn-trace / blue-fail-red-surfaced).
+  Total: 82 pass / 0 fail.
+- Smoke: T9 PASS (doc/smoke/phase-5-T9.md) — red needs-attention (2 critical)
+  vs blue approve (1 low), 0 retry, 41s elapsed.
+
 ## 2026-04-21 — Phase 4
 
 - Add /minimax:rescue / :status / :result / :cancel / :task-resume-candidate commands.
