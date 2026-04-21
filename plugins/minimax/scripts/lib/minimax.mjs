@@ -1498,3 +1498,88 @@ export async function callMiniAgentReview({
     retryWarning: "Warning: minimax review response failed parse/validation; retrying once with error hint...\n",
   });
 }
+
+/**
+ * Adversarial review: spawn mini-agent twice, once with red stance, once with
+ * blue stance. Both must succeed for ok=true. Each side gets its own 1-shot
+ * retry budget independently.
+ *
+ * The caller is responsible for queue serialization (runAdversarialReview holds
+ * a single queue slot across both spawns — see Plan §D5.3).
+ *
+ * v2 (I5): error string omits "red-team failed:" / "blue-team failed:" prefix
+ *          since `side` field already conveys which viewpoint failed.
+ *
+ * @returns Promise<
+ *   | { ok: true, red: <reviewSuccess>, blue: <reviewSuccess> }
+ *   | { ok: false, side: "red"|"blue", red?: any, blue?: any, error: string }
+ * >
+ */
+export async function callMiniAgentAdversarial({
+  context,
+  focus = "",
+  schemaPath,
+  cwd,
+  timeout = 120_000,
+  bin,
+  logDir,
+  truncated = false,
+  onProgressLine,
+}) {
+  const wrapStance = (stance) => (line) => {
+    if (typeof onProgressLine === "function") onProgressLine(`[${stance}] ${line}`);
+  };
+
+  const redResult = await _callReviewLike({
+    buildPrompt: ({ retryHint, previousRaw } = {}) =>
+      buildAdversarialPrompt({ stance: "red", schemaPath, focus, context, retryHint, previousRaw }),
+    schemaPath,
+    cwd,
+    timeout,
+    bin,
+    logDir,
+    truncated,
+    onProgressLine: onProgressLine ? wrapStance("red") : undefined,
+    retryWarning: "Warning: minimax adversarial-review (red) response failed parse/validation; retrying once with error hint...\n",
+    errorPrefix: "prompt-build-failed",
+  });
+
+  if (!redResult.ok) {
+    return {
+      ok: false,
+      side: "red",
+      red: redResult,
+      error: redResult.error,
+    };
+  }
+
+  const blueResult = await _callReviewLike({
+    buildPrompt: ({ retryHint, previousRaw } = {}) =>
+      buildAdversarialPrompt({ stance: "blue", schemaPath, focus, context, retryHint, previousRaw }),
+    schemaPath,
+    cwd,
+    timeout,
+    bin,
+    logDir,
+    truncated,
+    onProgressLine: onProgressLine ? wrapStance("blue") : undefined,
+    retryWarning: "Warning: minimax adversarial-review (blue) response failed parse/validation; retrying once with error hint...\n",
+    errorPrefix: "prompt-build-failed",
+  });
+
+  if (!blueResult.ok) {
+    return {
+      ok: false,
+      side: "blue",
+      red: redResult,
+      blue: blueResult,
+      error: blueResult.error,
+    };
+  }
+
+  return {
+    ok: true,
+    red: redResult,
+    blue: blueResult,
+  };
+}
