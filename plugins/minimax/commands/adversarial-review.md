@@ -7,8 +7,10 @@ allowed-tools: Bash(node:*)
 Invoke the minimax companion to run an adversarial review:
 
 ```bash
-MINIMAX_COMPANION_CALLER=claude node "${CLAUDE_PLUGIN_ROOT}/scripts/minimax-companion.mjs" adversarial-review "$ARGUMENTS"
+MINIMAX_COMPANION_CALLER=claude node "${CLAUDE_PLUGIN_ROOT}/scripts/minimax-companion.mjs" adversarial-review --json "$ARGUMENTS"
 ```
+
+The companion emits structured JSON; render it per `references/adversarial-review-render.md`. This preserves the red block even when blue fails.
 
 Present the output to the user.
 
