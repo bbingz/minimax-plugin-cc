@@ -60,11 +60,9 @@ function makeFakeBin({ redResponse, blueResponse, redFinishReason = "stop", blue
   const helperPath = path.join(tmpDir, "mock-helper.mjs");
   fs.writeFileSync(helperPath, `
 import fs from "node:fs";
-const [, , stance, responsePath, logPath] = process.argv;
+// argv: stance responsePath logPath traceFile finishReason
+const [, , stance, responsePath, logPath, traceFile, finishReason] = process.argv;
 const content = fs.readFileSync(responsePath, "utf8");
-const finishReason = stance === "red"
-  ? (process.env.MOCK_RED_FINISH_REASON || "stop")
-  : (process.env.MOCK_BLUE_FINISH_REASON || "stop");
 const body = JSON.stringify({ content, thinking: null, tool_calls: [], finish_reason: finishReason });
 const text = [
   "=".repeat(80),
@@ -84,13 +82,14 @@ const text = [
   "",
 ].join("\\n");
 fs.writeFileSync(logPath, text);
-fs.appendFileSync(process.env.MOCK_TRACE_FILE, stance + "\\n");
+fs.appendFileSync(traceFile, stance + "\\n");
 process.stdout.write("Log file: " + logPath + "\\n");
 process.stdout.write("Session Statistics:\\n");
 `);
-  process.env.MOCK_RED_FINISH_REASON = redFinishReason;
-  process.env.MOCK_BLUE_FINISH_REASON = blueFinishReason;
 
+  // v0.1.2: bake per-fake-bin config into script literals instead of relying on
+  // process.env shared state, which would cross-contaminate under
+  // --test-concurrency.
   const script = `#!/bin/sh
 PROMPT=""
 while [ $# -gt 0 ]; do
@@ -98,18 +97,17 @@ while [ $# -gt 0 ]; do
   shift
 done
 case "$PROMPT" in
-  *"你是红队"*) STANCE=red; RESP_PATH="${redResponseFile}" ;;
-  *"你是蓝队"*) STANCE=blue; RESP_PATH="${blueResponseFile}" ;;
-  *) STANCE=unknown; RESP_PATH="${redResponseFile}" ;;
+  *"你是红队"*) STANCE=red; RESP_PATH="${redResponseFile}"; FINISH_REASON="${redFinishReason}" ;;
+  *"你是蓝队"*) STANCE=blue; RESP_PATH="${blueResponseFile}"; FINISH_REASON="${blueFinishReason}" ;;
+  *) STANCE=unknown; RESP_PATH="${redResponseFile}"; FINISH_REASON="stop" ;;
 esac
 TS=$(date +%Y%m%d_%H%M%S)
 RAND=$(awk 'BEGIN{srand(); printf "%06x", int(rand()*16777216)}')
 LOGFILE="${logDir}/agent_run_\${TS}_\${STANCE}_\${RAND}.log"
-node ${helperPath} "$STANCE" "$RESP_PATH" "$LOGFILE"
+node "${helperPath}" "$STANCE" "$RESP_PATH" "$LOGFILE" "${traceFile}" "$FINISH_REASON"
 exit 0
 `;
   fs.writeFileSync(binPath, script, { mode: 0o755 });
-  process.env.MOCK_TRACE_FILE = traceFile;
 
   return {
     binPath,
@@ -117,9 +115,7 @@ exit 0
     traceFile,
     readTrace: () => fs.readFileSync(traceFile, "utf8").trim().split("\n").filter(Boolean),
     cleanup: () => {
-      delete process.env.MOCK_TRACE_FILE;
-      delete process.env.MOCK_RED_FINISH_REASON;
-      delete process.env.MOCK_BLUE_FINISH_REASON;
+      // v0.1.2: no process.env state to clean up; config is baked into the fake.
       fs.rmSync(tmpDir, { recursive: true, force: true });
     },
   };
