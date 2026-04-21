@@ -1224,9 +1224,31 @@ function reviewSuccess(data, { truncated, retry_used, retry_notice, logPath }) {
   };
 }
 
-export async function callMiniAgentReview({
-  context,
-  focus = "",
+/**
+ * Generic review-style call: one spawn + 1-shot retry on parse/validate failure.
+ *
+ * Both /minimax:review and /minimax:adversarial-review share this skeleton.
+ * Differences are isolated to the `buildPrompt` callback and `errorPrefix`.
+ *
+ * Module-private (no `export`); only callMiniAgentReview / callMiniAgentAdversarial use this.
+ *
+ * @param {object} opts
+ * @param {(args:{retryHint?:string,previousRaw?:string})=>string} opts.buildPrompt
+ *        — pure function returning the full prompt string given optional retry args
+ * @param {string} opts.schemaPath          — schema for validateReviewOutput
+ * @param {string} opts.cwd
+ * @param {number} [opts.timeout=120000]
+ * @param {string} [opts.bin]
+ * @param {string} [opts.logDir]
+ * @param {boolean} [opts.truncated=false]
+ * @param {(line:string)=>void} [opts.onProgressLine]
+ * @param {string} [opts.retryWarning]      — stderr warning shown before retry; default mirrors review
+ * @param {string} [opts.errorPrefix]       — error string prefix for prompt-build failures.
+ *                                            Defaults to "schema-load-failed" (review's historic value).
+ * @returns {Promise<{ok:true,...,truncated,retry_used,retriedOnce,retry_notice,logPath} | {ok:false,error,...}>}
+ */
+async function _callReviewLike({
+  buildPrompt,
   schemaPath,
   cwd,
   timeout = 120_000,
@@ -1234,12 +1256,14 @@ export async function callMiniAgentReview({
   logDir,
   truncated = false,
   onProgressLine,
+  retryWarning = "Warning: minimax review response failed parse/validation; retrying once with error hint...\n",
+  errorPrefix = "schema-load-failed",
 }) {
   let firstPrompt;
   try {
-    firstPrompt = buildReviewPrompt({ schemaPath, focus, context });
+    firstPrompt = buildPrompt({});
   } catch (e) {
-    return reviewError({ error: `schema-load-failed: ${e.message}`, truncated, retry_used: false });
+    return reviewError({ error: `${errorPrefix}: ${e.message}`, truncated, retry_used: false });
   }
 
   const firstCall = await callMiniAgent({ prompt: firstPrompt, cwd, timeout, bin, logDir, onProgressLine });
@@ -1273,11 +1297,11 @@ export async function callMiniAgentReview({
     ? `schema validation errors: ${firstValidation.errors.slice(0, 3).join("; ")}`
     : `parse failure (${firstExtracted.error}${firstExtracted.parseError ? ": " + firstExtracted.parseError : ""})`;
 
-  process.stderr.write("Warning: minimax review response failed parse/validation; retrying once with error hint...\n");
+  process.stderr.write(retryWarning);
 
   let retryPrompt;
   try {
-    retryPrompt = buildReviewPrompt({ schemaPath, focus, context, retryHint, previousRaw: firstCls.response });
+    retryPrompt = buildPrompt({ retryHint, previousRaw: firstCls.response });
   } catch (e) {
     return reviewError({
       error: `Failed to rebuild retry prompt: ${e.message}`,
@@ -1328,5 +1352,31 @@ export async function callMiniAgentReview({
     retry_used: true,
     retry_notice: `Initial response failed; retry succeeded (hint: ${retryHint})`,
     logPath: retryCls.logPath,
+  });
+}
+
+export async function callMiniAgentReview({
+  context,
+  focus = "",
+  schemaPath,
+  cwd,
+  timeout = 120_000,
+  bin,
+  logDir,
+  truncated = false,
+  onProgressLine,
+}) {
+  const buildPrompt = ({ retryHint, previousRaw } = {}) =>
+    buildReviewPrompt({ schemaPath, focus, context, retryHint, previousRaw });
+  return _callReviewLike({
+    buildPrompt,
+    schemaPath,
+    cwd,
+    timeout,
+    bin,
+    logDir,
+    truncated,
+    onProgressLine,
+    retryWarning: "Warning: minimax review response failed parse/validation; retrying once with error hint...\n",
   });
 }
