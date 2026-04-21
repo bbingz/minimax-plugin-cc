@@ -69,6 +69,58 @@ node --test plugins/minimax/scripts/lib/*.test.mjs
 
 Current: **82 pass / 0 fail** (as of v0.1.0; was 79 at `phase-4-rescue` baseline + 3 callMiniAgentAdversarial mock tests in `minimax-adversarial.test.mjs`. The `minimax.test.mjs` custom test framework grew internal counter from 45 to 50 with +5 buildAdversarialPrompt unit tests but those don't bump node:test's outer count.)
 
+## Cross-plugin alignment response (Gemini v0.6.0 baseline → minimax v0.1.2)
+
+> Response to `/Users/bing/-Code-/gemini-plugin-cc/docs/alignment/minimax.md` (their 2026-04-21 review of our v0.1.0). Per `/Users/bing/-Code-/gemini-plugin-cc/docs/alignment/README.md` and its "单向流动" rule, the reply lives here. Each point below was re-checked against actual v0.1.2 code and local runtime artifacts before writing.
+
+**Per-finding verdicts**
+
+- **P0 — Timing 完全缺席**: confirmed.
+  - `grep -rE "timing|appendTiming|TimingAccumulator|timings\.ndjson" plugins/minimax/scripts/` returned no hits.
+  - `grep -n "TIMING\|timing" plugins/minimax/scripts/lib/state.mjs` returned no hits.
+  - Their broad conclusion is correct: this is not a stubbed feature, it is absent. The architectural follow-up we agree with is "minimum viable timing", not a copy of Gemini's full six-segment streaming model.
+  - Current fit for Mini-Agent is likely `spawnAt -> first-log-timestamp -> last-log-timestamp -> process-close`, which naturally yields cold / effective / tail without pretending we have per-event stream timing.
+
+- **P1 — Primary-model attestation missing**: confirmed as currently blocked by upstream log shape.
+  - Inspected the latest local Mini-Agent log: `~/.mini-agent/log/agent_run_20260421_214527.log`.
+  - Verified fields present: REQUEST/RESPONSE timestamps and `finish_reason`.
+  - Did **not** find a discrete served-model field in the RESPONSE block or another machine-readable equivalent to Gemini's `stats.models`.
+  - The word `MiniMax` appears in prompt text/system prompt, which is not evidence of the actually served model. So their request for verification was right, and the result is: attestation is not implementable from current logs without upstream Mini-Agent changes.
+
+- **P2 — Hook cleanup likely missing**: confirmed.
+  - Our [`plugins/minimax/scripts/session-lifecycle-hook.mjs`](/Users/bing/-Code-/minimax-plugin-cc/plugins/minimax/scripts/session-lifecycle-hook.mjs) is 30 lines vs Gemini's 114 lines.
+  - Actual behavior today is minimal by design: `SessionStart` injects `MINIMAX_COMPANION_SESSION_ID`; `SessionEnd` deletes the session-id file. No workspace scan, no stale-job pruning, no orphan-PID cleanup.
+  - Gemini's size-based suspicion was therefore directionally correct. More importantly, the growth risk is real for our own state paths: `job-control.mjs` defaults to `~/.claude/plugins/minimax/jobs`, and the hook currently does nothing to prune it.
+
+- **P3 — `/minimax:timing` missing**: accepted as dependent on P0.
+  - No command exists today.
+  - We should only add it after the underlying telemetry schema exists; otherwise the command becomes UI theater over empty data.
+
+- **P4 — `lib/*.test.mjs` inline style**: acknowledged, not treated as a defect.
+  - We are keeping the co-located `lib/*.test.mjs` layout for now.
+  - After the v0.1.2 patch set, `node --test plugins/minimax/scripts/lib/*.test.mjs` is at 86 pass / 0 fail, so the current layout is not impeding verification.
+
+**Answers to Gemini's "我看不到的地方"**
+
+1. **Mini-Agent 是什么**: third-party CLI/runtime from `MiniMax-AI/Mini-Agent`, not an official minimax-plugin-maintained runner. We wrap it because it gives us a tool-capable agent surface plus stable log artifacts to parse.
+2. **Why log-file fallback instead of stdout-only parsing**: stdout is human-oriented and ANSI/noise-prone; logs are the most structured artifact Mini-Agent gives us. That design is intentional, not accidental.
+3. **Log format / timing implications**: current log files are sectioned plain text with REQUEST/RESPONSE blocks and timestamps, not NDJSON. They are good enough for coarse timing, not rich enough for Gemini-style per-event telemetry or served-model attestation.
+4. **Why no timing constants in `state.mjs`**: because timing has not been bootstrapped yet. This is an actual gap, not hidden code.
+5. **Role of `PROGRESS.md`**: cross-session handoff + decision summary. Deep plan detail still lives under `docs/superpowers/plans/*.md`.
+6. **How `task-resume-candidate` is triggered**: currently as an explicit user-facing command, not an automatic rescue preflight.
+
+**Adoption / non-adoption**
+
+- We are adopting the core of Gemini's timing criticism, but not the exact implementation shape. Mini-Agent lacks stream events, so a coarse 3-segment model is a better fit than pretending we can reproduce Gemini's 6-segment event-router model.
+- We are adopting the hook-cleanup criticism directly. A lightweight stale-job cleanup on `SessionStart` is appropriate for our current `~/.claude/plugins/minimax/jobs` path.
+- We are **not** claiming parity on primary-model attestation until Mini-Agent exposes a real served-model field.
+
+**Tentative v0.1.3 scope seeded by this review**
+
+1. Add coarse timing telemetry for Mini-Agent-backed runs.
+2. Add stale-job cleanup to `session-lifecycle-hook.mjs`.
+3. Open/track an upstream Mini-Agent request for served-model logging.
+
 ## v0.1.0 shipped
 
 Last Phase 5 work commit: `6235f60`. v0.2 路线见 `docs/superpowers/specs/2026-04-20-minimax-plugin-cc-design.md` §8.5。
