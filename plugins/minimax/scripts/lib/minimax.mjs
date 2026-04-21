@@ -1113,20 +1113,138 @@ export function buildReviewPrompt({ schemaPath, focus, context, retryHint, previ
     retryBlock = lines.join("\n");
   }
 
-  const result = template
+  // v2 (C3): substitute non-CONTEXT placeholders first; validate against an
+  // explicit whitelist of expected slots; only then substitute {{CONTEXT}} last
+  // so user-supplied diff containing {{X}} (React/Vue templates) is treated as
+  // data, not mistaken for an unreplaced placeholder.
+  const EXPECTED_PLACEHOLDERS = ["{{SCHEMA_JSON}}", "{{FOCUS}}", "{{RETRY_HINT}}", "{{CONTEXT}}"];
+  let staged = template
     .replace("{{SCHEMA_JSON}}", schemaText)
     .replace("{{FOCUS}}", focusRendered)
-    .replace("{{CONTEXT}}", context)
     .replace("{{RETRY_HINT}}", retryBlock);
+  for (const p of EXPECTED_PLACEHOLDERS) {
+    if (p === "{{CONTEXT}}") continue;
+    if (staged.includes(p)) {
+      throw new Error(`buildReviewPrompt: placeholder ${p} not substituted (template malformed?)`);
+    }
+  }
+  const result = staged.replace("{{CONTEXT}}", context);
+  if (result.includes("{{CONTEXT}}")) {
+    throw new Error("buildReviewPrompt: {{CONTEXT}} placeholder missing from template");
+  }
 
-  // Defensive assertion (code-review Important): String.prototype.replace only
-  // replaces the first match. If any substitution value contained a literal
-  // {{X}}, a later placeholder could be shadowed inside the injected content
-  // instead of filled in the template slot — producing a silently broken prompt.
-  // Fail loud instead.
-  const leftover = result.match(/\{\{[A-Z_]+\}\}/);
-  if (leftover) {
-    throw new Error(`buildReviewPrompt: unreplaced placeholder ${leftover[0]} remains after substitution`);
+  return result.trimEnd();
+}
+
+// ── Adversarial review prompt builder (Phase 5 Task 5.2) ────────────────────
+
+const ADVERSARIAL_PROMPT_PATH = path.resolve(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "prompts", "adversarial-review.md")
+);
+
+let _adversarialTemplateCache = null;
+
+function loadAdversarialTemplate() {
+  if (_adversarialTemplateCache !== null) return _adversarialTemplateCache;
+  _adversarialTemplateCache = fs.readFileSync(ADVERSARIAL_PROMPT_PATH, "utf8");
+  return _adversarialTemplateCache;
+}
+
+export function _invalidateAdversarialTemplateCache() { _adversarialTemplateCache = null; }
+
+// v2 (C1): 内嵌的人物引用统一用中文「」而非 ASCII " 嵌套，避免 JS SyntaxError
+// v2 (I9): 措辞被 reviewer 标"激将"，T9 smoke (Task 5.10) 后视红队 severity 分布判断是否降级
+export const RED_STANCE_INSTRUCTION = [
+  "你是红队（red team）。本次审查的唯一目标是**击破**这次改动的可发布性。",
+  "默认怀疑。除非证据明示，否则假设它会以隐蔽、高代价、用户可见的方式失败。",
+  "不要因「作者意图良好」或「看起来会有后续修复」给出妥协。只在 happy path 工作的代码即视为真问题。",
+  "重点攻击面：",
+  "- 鉴权、权限、租户隔离、信任边界",
+  "- 数据丢失/损坏/重复/不可逆状态变更",
+  "- 回滚安全、retry、部分失败、幂等性缺口",
+  "- 竞态、顺序假设、stale 状态、re-entrancy",
+  "- empty/null/timeout/降级依赖行为",
+  "- 版本漂移、schema 漂移、迁移风险、兼容性回退",
+  "- observability 缺口（出问题查不到）",
+  "summary 字段写成简短的 ship/no-ship 判定。「不要发布」/「阻塞 release」/「高风险回退」这种开头是合法的；「本次改动既有改进也有顾虑」这种平衡修辞是不合法的。",
+  "不要用「可能」/「或许」/「存在风险」软化 finding —— 要么有依据写实，要么删掉。",
+  "本任务是只读审查：不要写文件、不执行修改型 bash 命令；只输出 JSON。",
+].join("\n");
+
+// v2 (I10): 蓝队任务重心从"预判反驳"改为"评估现有防御层 + 找低成本 mitigation gap"
+// (双 spawn 下蓝队看不到红队，预判反驳易产 straw-man)
+// v2 (M9): 末尾加 severity 校准段，避免蓝队把"加一行日志"标 critical
+export const BLUE_STANCE_INSTRUCTION = [
+  "你是蓝队（blue team）。本次审查的唯一目标是**辩护**这次改动的可发布性。",
+  "默认相信。除非证据明示，否则假设它在合理输入下能正确工作。",
+  "你的核心任务有两个：(1) **评估现有防御层是否充分**——已有的 schema 校验、类型系统、上游已 sanitize 的输入、测试覆盖、回滚机制、降级路径、容错设计——并指出这些防御为什么让看似危险的代码实际安全；(2) 找出现有改动里**真实存在的、值得修但低成本可修**的 mitigation gap（防御深度、可观测性、文档、retry 策略调优等）。",
+  "重点关注：",
+  "- 已有的防御层（schema 校验、类型系统、上游已 sanitize 的输入）让看似危险的代码实际安全",
+  "- 测试覆盖、回滚机制、降级路径、容错设计的现有保护",
+  "- 影响半径其实有限的场景（即使有 risk，blast radius 可控）",
+  "- 低成本的 mitigation 增量（如加一行日志、补一个 metric、一个 assert）",
+  "summary 字段写成简短的 ship-with-confidence 或 ship-with-mitigations 判定。「可以发布」/「现有防御足够」/「加 X 即可发布」这种开头是合法的；「本次改动有重大风险」这种向红队靠拢的修辞是不合法的（你不是仲裁，你是辩方）。",
+  "蓝队的 finding 是 mitigation gap，不是 risk。每个 finding 的 recommendation 字段必须给出具体动作（不是「考虑增强」这种模糊话）。",
+  "**蓝队 severity 校准**：critical = 不补会出生产事故；high = 不补有显著运维风险；medium = 维护期 toil；low = 可选打磨。不要把「加一行日志」标 critical。",
+  "如果你确实找不到任何 mitigation gap，`findings` 为空数组合法（说明现有改动按蓝队视角已经足够好；这不影响 T9 通过）。",
+  "本任务是只读审查：不要写文件、不执行修改型 bash 命令；只输出 JSON。",
+].join("\n");
+
+/**
+ * Build the adversarial-review prompt for a given stance.
+ *
+ * @param {object} opts
+ * @param {"red"|"blue"} opts.stance        — which viewpoint instruction to inject
+ * @param {string} opts.schemaPath          — absolute path to review-output.schema.json
+ * @param {string} opts.focus               — user-supplied focus hint (may be empty)
+ * @param {string} opts.context             — full diff text
+ * @param {string} [opts.retryHint]         — if non-empty, render a retry note block
+ * @param {string} [opts.previousRaw]       — prior failed response (redacted, capped 1500)
+ * @returns {string}
+ */
+export function buildAdversarialPrompt({ stance, schemaPath, focus, context, retryHint, previousRaw }) {
+  if (stance !== "red" && stance !== "blue") {
+    throw new Error(`buildAdversarialPrompt: stance must be 'red' or 'blue', got '${stance}'`);
+  }
+  const stanceInstruction = stance === "red" ? RED_STANCE_INSTRUCTION : BLUE_STANCE_INSTRUCTION;
+  const schemaText = fs.readFileSync(schemaPath, "utf8");
+  const template = loadAdversarialTemplate();
+  const focusRendered = (focus && focus.trim()) ? focus : "(no additional focus provided)";
+
+  // v2 (C4): retry hint 全中文，与 stance 主体语境一致；避免 M2.7 双语切换跑偏
+  let retryBlock = "";
+  if (retryHint && retryHint.trim()) {
+    const lines = [
+      "# 重试提示",
+      "",
+      `你上一次的输出未通过校验：${retryHint}。请只返回严格匹配上方 schema 的 RAW JSON，不要 markdown 代码栅栏，不要前言后记。`,
+    ];
+    if (previousRaw && previousRaw.trim()) {
+      const redacted = redactSecrets(String(previousRaw)).slice(0, 1500);
+      lines.push("");
+      lines.push("## 上次响应原文（截前 1500 字符，已脱敏）");
+      lines.push("");
+      lines.push(redacted);
+    }
+    retryBlock = lines.join("\n");
+  }
+
+  // v2 (C3): leftover 校验改为白名单 set 在 {{CONTEXT}} 替换之前做，避免误命中用户 diff 中的 {{...}} 文本
+  const EXPECTED_PLACEHOLDERS = ["{{STANCE_INSTRUCTION}}", "{{SCHEMA_JSON}}", "{{FOCUS}}", "{{RETRY_HINT}}", "{{CONTEXT}}"];
+  let staged = template
+    .replace("{{STANCE_INSTRUCTION}}", stanceInstruction)
+    .replace("{{SCHEMA_JSON}}", schemaText)
+    .replace("{{FOCUS}}", focusRendered)
+    .replace("{{RETRY_HINT}}", retryBlock);
+  for (const p of EXPECTED_PLACEHOLDERS) {
+    if (p === "{{CONTEXT}}") continue;
+    if (staged.includes(p)) {
+      throw new Error(`buildAdversarialPrompt: placeholder ${p} not substituted (template malformed?)`);
+    }
+  }
+  const result = staged.replace("{{CONTEXT}}", context);
+  if (result.includes("{{CONTEXT}}")) {
+    throw new Error("buildAdversarialPrompt: {{CONTEXT}} placeholder missing from template");
   }
 
   return result.trimEnd();

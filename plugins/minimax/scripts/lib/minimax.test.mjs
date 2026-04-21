@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import assert from "node:assert";
 import {
   validateYamlForApiKeyWrite,
   validateKeyContent,
@@ -8,6 +9,10 @@ import {
   redactSecrets,
   extractLogPathFromStdout,
   parseFinalResponseFromLog,
+  buildAdversarialPrompt,
+  RED_STANCE_INSTRUCTION,
+  BLUE_STANCE_INSTRUCTION,
+  _invalidateAdversarialTemplateCache,
 } from "./minimax.mjs";
 
 let passed = 0, failed = 0;
@@ -201,6 +206,74 @@ test("escapes backslash and quote", () => {
 console.log("# redactSecrets");
 test("redacts sk- keys", () => {
   assertEqual(redactSecrets("Here is sk-abcdefghij0123456789 extra"), "Here is sk-***REDACTED*** extra");
+});
+
+console.log("# buildAdversarialPrompt (Phase 5 Task 5.2)");
+const ADVERSARIAL_SCHEMA_PATH = path.resolve("plugins/minimax/schemas/review-output.schema.json");
+
+test("buildAdversarialPrompt: red stance injects RED_STANCE_INSTRUCTION verbatim", () => {
+  _invalidateAdversarialTemplateCache();
+  const out = buildAdversarialPrompt({
+    stance: "red",
+    schemaPath: ADVERSARIAL_SCHEMA_PATH,
+    focus: "auth path",
+    context: "diff --git a/x.js b/x.js\n+let x = 1;\n",
+  });
+  assert.ok(out.includes(RED_STANCE_INSTRUCTION), "red stance text must appear");
+  assert.ok(!out.includes("{{STANCE_INSTRUCTION}}"), "placeholder must be replaced");
+  assert.ok(out.includes("auth path"), "focus must appear");
+  assert.ok(!/\{\{[A-Z_]+\}\}/.test(out), "no leftover placeholders");
+});
+
+test("buildAdversarialPrompt: blue stance injects BLUE_STANCE_INSTRUCTION verbatim", () => {
+  _invalidateAdversarialTemplateCache();
+  const out = buildAdversarialPrompt({
+    stance: "blue",
+    schemaPath: ADVERSARIAL_SCHEMA_PATH,
+    focus: "",
+    context: "diff --git a/x.js b/x.js\n+let x = 1;\n",
+  });
+  assert.ok(out.includes(BLUE_STANCE_INSTRUCTION), "blue stance text must appear");
+  assert.ok(!out.includes(RED_STANCE_INSTRUCTION), "red stance text must NOT appear when stance=blue");
+  assert.ok(out.includes("(no additional focus provided)"), "empty focus → placeholder default");
+});
+
+test("buildAdversarialPrompt: rejects unknown stance", () => {
+  assert.throws(
+    () => buildAdversarialPrompt({ stance: "purple", schemaPath: ADVERSARIAL_SCHEMA_PATH, focus: "", context: "x" }),
+    /stance must be 'red' or 'blue'/
+  );
+});
+
+test("buildAdversarialPrompt: retry hint and previousRaw are interpolated and redacted", () => {
+  _invalidateAdversarialTemplateCache();
+  const previous = "leak token sk-aaaaaaaaaaaaaaaaaaaa secret";
+  const out = buildAdversarialPrompt({
+    stance: "red",
+    schemaPath: ADVERSARIAL_SCHEMA_PATH,
+    focus: "",
+    context: "x",
+    retryHint: "schema validation errors: bad type",
+    previousRaw: previous,
+  });
+  assert.ok(out.includes("# 重试提示"), "retry block must render (Chinese title per C4)");
+  assert.ok(out.includes("schema validation errors: bad type"));
+  assert.ok(out.includes("sk-***REDACTED***"), "secret must be redacted");
+  assert.ok(!out.includes("sk-aaaaaaaaaaaaaaaaaaaa"), "raw secret must not leak");
+});
+
+test("buildAdversarialPrompt: user diff containing {{X}} is NOT mistaken for leftover placeholder (C3 regression)", () => {
+  _invalidateAdversarialTemplateCache();
+  const reactDiff = "diff --git a/x.jsx b/x.jsx\n+const Greeting = () => <div>{{userName}}</div>;\n";
+  const out = buildAdversarialPrompt({
+    stance: "red",
+    schemaPath: ADVERSARIAL_SCHEMA_PATH,
+    focus: "",
+    context: reactDiff,
+  });
+  assert.ok(out.includes("{{userName}}"), "user content {{X}} must survive verbatim into final prompt");
+  assert.ok(!out.includes("{{STANCE_INSTRUCTION}}"), "real placeholders still substituted");
+  assert.ok(!out.includes("{{CONTEXT}}"), "real placeholders still substituted");
 });
 
 (async () => {
