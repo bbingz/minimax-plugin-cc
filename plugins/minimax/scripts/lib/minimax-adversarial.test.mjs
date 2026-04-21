@@ -40,7 +40,9 @@ function rand() { return Math.random().toString(36).slice(2, 8); }
 //   - Appends the stance to a trace file (v2 I2 — lets tests assert spawn count).
 //   - Writes a fresh log file with the canned content for that stance, then
 //     prints "Log file: <path>" so callMiniAgent can pick it up.
-function makeFakeBin({ redResponse, blueResponse }) {
+//   - finishReason per stance overridable (default "stop"); used by M5 test
+//     to simulate length-truncation.
+function makeFakeBin({ redResponse, blueResponse, redFinishReason = "stop", blueFinishReason = "stop" }) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-agent-fake-"));
   const binPath = path.join(tmpDir, "mini-agent");
   const logDir = path.join(tmpDir, "log");
@@ -60,7 +62,10 @@ function makeFakeBin({ redResponse, blueResponse }) {
 import fs from "node:fs";
 const [, , stance, responsePath, logPath] = process.argv;
 const content = fs.readFileSync(responsePath, "utf8");
-const body = JSON.stringify({ content, thinking: null, tool_calls: [], finish_reason: "stop" });
+const finishReason = stance === "red"
+  ? (process.env.MOCK_RED_FINISH_REASON || "stop")
+  : (process.env.MOCK_BLUE_FINISH_REASON || "stop");
+const body = JSON.stringify({ content, thinking: null, tool_calls: [], finish_reason: finishReason });
 const text = [
   "=".repeat(80),
   "Agent Run Log - mock",
@@ -83,6 +88,8 @@ fs.appendFileSync(process.env.MOCK_TRACE_FILE, stance + "\\n");
 process.stdout.write("Log file: " + logPath + "\\n");
 process.stdout.write("Session Statistics:\\n");
 `);
+  process.env.MOCK_RED_FINISH_REASON = redFinishReason;
+  process.env.MOCK_BLUE_FINISH_REASON = blueFinishReason;
 
   const script = `#!/bin/sh
 PROMPT=""
@@ -111,6 +118,8 @@ exit 0
     readTrace: () => fs.readFileSync(traceFile, "utf8").trim().split("\n").filter(Boolean),
     cleanup: () => {
       delete process.env.MOCK_TRACE_FILE;
+      delete process.env.MOCK_RED_FINISH_REASON;
+      delete process.env.MOCK_BLUE_FINISH_REASON;
       fs.rmSync(tmpDir, { recursive: true, force: true });
     },
   };
@@ -203,6 +212,40 @@ test("callMiniAgentAdversarial: blue parse fails → ok=false side=blue, red sti
     const blueCount = trace.filter(s => s === "blue").length;
     assert.equal(redCount, 1, "red spawned once (success)");
     assert.equal(blueCount, 2, "blue spawned twice (first + retry)");
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test("callMiniAgentAdversarial: M5 short-circuit — red truncated+unparseable does NOT retry (v0.1.1)", async () => {
+  // Red first-shot: finish_reason=length AND content is unparseable JSON.
+  // _callReviewLike must short-circuit (no second red spawn) — retry would
+  // identically truncate.
+  const fake = makeFakeBin({
+    redResponse: "garbage that won't parse",
+    blueResponse: VALID_REVIEW,
+    redFinishReason: "length",
+  });
+  try {
+    const r = await callMiniAgentAdversarial({
+      context: "diff",
+      focus: "",
+      schemaPath: SCHEMA_PATH,
+      cwd: process.cwd(),
+      timeout: 30_000,
+      bin: fake.binPath,
+      logDir: fake.logDir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.side, "red");
+    assert.equal(r.red.retry_used, false, "M5: NO retry when first-shot is truncated+unparseable");
+    assert.ok(r.red.error.includes("truncated-and-unparseable"), "error must signal the short-circuit");
+    assert.ok(r.red.truncated === true, "truncated flag preserved");
+    const trace = fake.readTrace();
+    const redCount = trace.filter(s => s === "red").length;
+    const blueCount = trace.filter(s => s === "blue").length;
+    assert.equal(redCount, 1, "red spawned EXACTLY ONCE (no wasted retry)");
+    assert.equal(blueCount, 0, "blue must not spawn");
   } finally {
     fake.cleanup();
   }

@@ -1,4 +1,16 @@
 
+## 2026-04-21 19:30 [Claude opus controller] — v0.1.1 patch — minimax-agent self-review findings landed
+
+- **status**: done
+- **scope**: 3 fixes from `minimax:minimax-agent` self-review of Phase 5 dual-spawn code (M5 / M2 / H4) + 2 new tests + version bump 0.1.0 → 0.1.1
+- **summary**:
+  - **M5**: `_callReviewLike` short-circuit when first-shot `truncated && !extracted.ok` — retry would identically truncate, wastes a spawn + queue slot. Returns `truncated-and-unparseable` error directly. Saves up to 1 × timeout per affected adversarial-review.
+  - **M2**: `buildAdversarialPrompt` + `buildReviewPrompt` use a sentinel (`__MINIMAX_CONTEXT_SLOT__`) to swap the real `{{CONTEXT}}` slot BEFORE substituting other placeholders. Eliminates first-match-shadowing risk when previousRaw / focus / retryHint contains literal `{{CONTEXT}}`. C3 patch (Phase 5) was incomplete; this is the proper fix.
+  - **H4**: `callMiniAgentAdversarial` JSDoc clarifies `timeout` is per-spawn, worst-case wall = 4 × timeout. Existing call site in companion already accounts for this (`maxWaitMs: timeout * 4 + 30_000`); fix is doc-only but prevents future schedulers from miscalculating.
+- **review provenance**: dispatched via `Task` tool with `subagent_type: minimax:minimax-agent` against the just-shipped v0.1.0 code — first end-to-end use of the subagent path. 7 tool calls, 149s, 16 findings (4 H / 6 M / 6 L); 3 most actionable picked here.
+- **tests**: 83 pass / 0 fail (+1 over 82). Replaced 1 obsolete review test (now asserts new correct behavior under M2) + added 1 buildAdversarialPrompt M2 regression + 1 callMiniAgentAdversarial M5 short-circuit test.
+- **next**: tag v0.1.1, push, gh release. User runs `/plugin update` to pull fix.
+
 ## 2026-04-21 18:50 [Claude opus controller] — Phase 5 done (T9 PASS, ready to tag v0.1.0)
 
 - **status**: done

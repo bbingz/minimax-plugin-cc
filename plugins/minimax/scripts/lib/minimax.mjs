@@ -1113,25 +1113,25 @@ export function buildReviewPrompt({ schemaPath, focus, context, retryHint, previ
     retryBlock = lines.join("\n");
   }
 
-  // v2 (C3): substitute non-CONTEXT placeholders first; validate against an
-  // explicit whitelist of expected slots; only then substitute {{CONTEXT}} last
-  // so user-supplied diff containing {{X}} (React/Vue templates) is treated as
-  // data, not mistaken for an unreplaced placeholder.
-  const EXPECTED_PLACEHOLDERS = ["{{SCHEMA_JSON}}", "{{FOCUS}}", "{{RETRY_HINT}}", "{{CONTEXT}}"];
+  // v2 (C3) + M2 (v0.1.1 follow-up): swap real {{CONTEXT}} slot to a sentinel
+  // BEFORE substituting other placeholders. Isolates user-supplied focus /
+  // retryHint / previousRaw from poisoning the {{CONTEXT}} substitution.
+  const CONTEXT_SENTINEL = " __MINIMAX_CONTEXT_SLOT__ ";
+  const EXPECTED_PLACEHOLDERS = ["{{SCHEMA_JSON}}", "{{FOCUS}}", "{{RETRY_HINT}}"];
   let staged = template
+    .replace("{{CONTEXT}}", CONTEXT_SENTINEL)
     .replace("{{SCHEMA_JSON}}", schemaText)
     .replace("{{FOCUS}}", focusRendered)
     .replace("{{RETRY_HINT}}", retryBlock);
   for (const p of EXPECTED_PLACEHOLDERS) {
-    if (p === "{{CONTEXT}}") continue;
     if (staged.includes(p)) {
       throw new Error(`buildReviewPrompt: placeholder ${p} not substituted (template malformed?)`);
     }
   }
-  const result = staged.replace("{{CONTEXT}}", context);
-  if (result.includes("{{CONTEXT}}")) {
+  if (!staged.includes(CONTEXT_SENTINEL)) {
     throw new Error("buildReviewPrompt: {{CONTEXT}} placeholder missing from template");
   }
+  const result = staged.replace(CONTEXT_SENTINEL, context);
 
   return result.trimEnd();
 }
@@ -1229,23 +1229,29 @@ export function buildAdversarialPrompt({ stance, schemaPath, focus, context, ret
     retryBlock = lines.join("\n");
   }
 
-  // v2 (C3): leftover 校验改为白名单 set 在 {{CONTEXT}} 替换之前做，避免误命中用户 diff 中的 {{...}} 文本
-  const EXPECTED_PLACEHOLDERS = ["{{STANCE_INSTRUCTION}}", "{{SCHEMA_JSON}}", "{{FOCUS}}", "{{RETRY_HINT}}", "{{CONTEXT}}"];
+  // v2 (C3) + M2 (v0.1.1 follow-up): swap the real {{CONTEXT}} slot to a
+  // null-byte sentinel BEFORE substituting any other placeholder. This isolates
+  // user-supplied content (focus / retryHint / previousRaw) from being able to
+  // poison the {{CONTEXT}} substitution via first-match shadowing or misleading
+  // "missing from template" errors when previousRaw legitimately contains the
+  // literal string "{{CONTEXT}}".
+  const CONTEXT_SENTINEL = " __MINIMAX_CONTEXT_SLOT__ ";
+  const EXPECTED_PLACEHOLDERS = ["{{STANCE_INSTRUCTION}}", "{{SCHEMA_JSON}}", "{{FOCUS}}", "{{RETRY_HINT}}"];
   let staged = template
+    .replace("{{CONTEXT}}", CONTEXT_SENTINEL)
     .replace("{{STANCE_INSTRUCTION}}", stanceInstruction)
     .replace("{{SCHEMA_JSON}}", schemaText)
     .replace("{{FOCUS}}", focusRendered)
     .replace("{{RETRY_HINT}}", retryBlock);
   for (const p of EXPECTED_PLACEHOLDERS) {
-    if (p === "{{CONTEXT}}") continue;
     if (staged.includes(p)) {
       throw new Error(`buildAdversarialPrompt: placeholder ${p} not substituted (template malformed?)`);
     }
   }
-  const result = staged.replace("{{CONTEXT}}", context);
-  if (result.includes("{{CONTEXT}}")) {
+  if (!staged.includes(CONTEXT_SENTINEL)) {
     throw new Error("buildAdversarialPrompt: {{CONTEXT}} placeholder missing from template");
   }
+  const result = staged.replace(CONTEXT_SENTINEL, context);
 
   return result.trimEnd();
 }
@@ -1411,6 +1417,19 @@ async function _callReviewLike({
     }
   }
 
+  // M5 (v0.1.1 follow-up): if first-shot was truncated AND parse failed, a retry
+  // will hit the same length cap and almost certainly truncate identically.
+  // Short-circuit instead of wasting a second spawn + queue slot.
+  if (firstTruncated && !firstExtracted.ok) {
+    return reviewError({
+      error: `truncated-and-unparseable: first-shot finish_reason=length/max_tokens with no parseable JSON; retry would also truncate`,
+      firstRawText: firstCls.response,
+      parseError: firstExtracted.parseError ?? null,
+      truncated: true,
+      retry_used: false,
+    });
+  }
+
   const retryHint = firstExtracted.ok
     ? `schema validation errors: ${firstValidation.errors.slice(0, 3).join("; ")}`
     : `parse failure (${firstExtracted.error}${firstExtracted.parseError ? ": " + firstExtracted.parseError : ""})`;
@@ -1509,6 +1528,13 @@ export async function callMiniAgentReview({
  *
  * v2 (I5): error string omits "red-team failed:" / "blue-team failed:" prefix
  *          since `side` field already conveys which viewpoint failed.
+ *
+ * **H4 (v0.1.1 follow-up): `timeout` is PER-SPAWN, not total.** Worst-case wall
+ * time for this function is `4 × timeout` (red first + red retry + blue first +
+ * blue retry). The runAdversarialReview caller in `minimax-companion.mjs`
+ * accordingly sets `acquireQueueSlot({ maxWaitMs: timeout * 4 + 30_000 })`.
+ * When wiring upstream schedulers (Phase 4 job-control deadline estimation),
+ * use `4 × timeout` as the conservative budget, not `timeout` itself.
  *
  * @returns Promise<
  *   | { ok: true, red: <reviewSuccess>, blue: <reviewSuccess> }

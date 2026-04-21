@@ -252,20 +252,22 @@ test("buildReviewPrompt: no previousRaw means no 'Previous response' heading (v2
   assert.ok(!prompt.includes("## Previous response"));
 });
 
-test("buildReviewPrompt: throws when a substitution value injects an earlier-unused placeholder (code-review Important)", () => {
-  // Simulate the degenerate case where focus happens to contain '{{CONTEXT}}'.
-  // After v2 (C3): non-CONTEXT placeholders are substituted first; then we
-  // .replace("{{CONTEXT}}", context) which hits FIRST occurrence (the one
-  // injected via focus). The template's real {{CONTEXT}} slot remains and
-  // trips the post-substitution guard. We now throw with the new message.
-  assert.throws(
-    () => buildReviewPrompt({
-      schemaPath: SCHEMA_PATH,
-      focus: "please review {{CONTEXT}} carefully",
-      context: "diff",
-    }),
-    /\{\{CONTEXT\}\}/
-  );
+test("buildReviewPrompt: focus containing literal {{CONTEXT}} is preserved as user data (M2 v0.1.1)", () => {
+  // After v0.1.1 M2 fix: real {{CONTEXT}} slot is swapped to a sentinel BEFORE
+  // any user-supplied placeholder substitution. So focus / retryHint / previousRaw
+  // can safely contain literal "{{CONTEXT}}" without poisoning the substitution.
+  // The literal text is preserved verbatim in the final prompt.
+  const out = buildReviewPrompt({
+    schemaPath: SCHEMA_PATH,
+    focus: "please review {{CONTEXT}} carefully",
+    context: "diff",
+  });
+  // Real CONTEXT slot received the actual context value
+  assert.ok(out.includes("diff"), "real {{CONTEXT}} slot must contain context value");
+  // Focus's literal {{CONTEXT}} survives verbatim
+  assert.ok(out.includes("please review {{CONTEXT}} carefully"), "focus must survive verbatim with its literal {{CONTEXT}}");
+  // No template artifact leaked
+  assert.ok(!out.includes("__MINIMAX_CONTEXT_SLOT__"), "sentinel must not leak");
 });
 
 import os from "node:os";

@@ -276,6 +276,26 @@ test("buildAdversarialPrompt: user diff containing {{X}} is NOT mistaken for lef
   assert.ok(!out.includes("{{CONTEXT}}"), "real placeholders still substituted");
 });
 
+test("buildAdversarialPrompt: previousRaw containing literal {{CONTEXT}} does NOT poison substitution (M2 v0.1.1)", () => {
+  _invalidateAdversarialTemplateCache();
+  // Simulate a model first-shot response that happens to mention "{{CONTEXT}}" in
+  // its prose (e.g. explaining why its output failed) — this gets fed back as
+  // previousRaw on retry. Pre-M2: the literal {{CONTEXT}} would be replaced first
+  // (first-match) leaving the real slot unfilled and triggering misleading error.
+  const previous = "I confused myself: I thought {{CONTEXT}} was a literal marker.";
+  const out = buildAdversarialPrompt({
+    stance: "blue",
+    schemaPath: ADVERSARIAL_SCHEMA_PATH,
+    focus: "",
+    context: "REAL_DIFF_PAYLOAD",
+    retryHint: "schema validation errors: bad type",
+    previousRaw: previous,
+  });
+  assert.ok(out.includes("REAL_DIFF_PAYLOAD"), "real context payload must reach the {{CONTEXT}} slot");
+  assert.ok(out.includes("{{CONTEXT}}"), "previousRaw's literal {{CONTEXT}} must survive verbatim (treated as user data)");
+  assert.ok(!out.includes("__MINIMAX_CONTEXT_SLOT__"), "internal sentinel must not leak");
+});
+
 (async () => {
   console.log("# extractLogPathFromStdout");
 

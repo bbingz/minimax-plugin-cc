@@ -1,5 +1,13 @@
 # minimax plugin CHANGELOG
 
+## 2026-04-21 — v0.1.1 (Phase 5 follow-up patch)
+
+- **M5**: `_callReviewLike` short-circuits when first-shot is `truncated && !extracted.ok` — retry would identically truncate, no point wasting another spawn + queue slot. New error code: `truncated-and-unparseable`.
+- **M2**: `buildAdversarialPrompt` + `buildReviewPrompt` swap real `{{CONTEXT}}` slot to a sentinel BEFORE substituting other placeholders. Prevents first-match-shadowing when previousRaw / focus / retryHint contains literal `{{CONTEXT}}` text. C3 patch was incomplete; this is the proper fix.
+- **H4**: `callMiniAgentAdversarial` JSDoc clarifies `timeout` is per-spawn (worst-case wall = 4 × timeout). Doc-only; existing call site already accounts for this.
+- **Provenance**: 3 fixes ranked top-3-actionable from a 16-finding self-review by `minimax:minimax-agent` subagent against just-shipped v0.1.0 code.
+- **Tests**: 83 pass / 0 fail (+1 over v0.1.0). 1 obsolete test replaced; +2 regression tests (M2 previousRaw poisoning / M5 truncated short-circuit).
+
 ## 2026-04-21 — Phase 5
 
 - Add /minimax:adversarial-review command (red team + blue team dual stance).
