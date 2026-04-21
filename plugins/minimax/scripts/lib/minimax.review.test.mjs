@@ -157,6 +157,20 @@ test("buildReviewPrompt: retry hint expands when retryHint provided", () => {
   assert.ok(prompt.includes("missing key: verdict"));
 });
 
+test("buildReviewPrompt: $& / $$ / $1 in user-derived fields survive verbatim (Gemini Critical v0.1.2 mirror)", () => {
+  const prompt = buildReviewPrompt({
+    schemaPath: SCHEMA_PATH,
+    focus: "$& focus $$ $1",
+    context: "diff --git a/x.js b/x.js\n+const out = str.replace(/foo/, '$& bar');\n+const dbl = '$$';\n+const cap = '$1';\n",
+    retryHint: "retry on $& $$ $1",
+  });
+  assert.ok(prompt.includes("$& focus $$ $1"), "focus replacement tokens must survive verbatim");
+  assert.ok(prompt.includes("'$& bar'"), "context $& must survive verbatim");
+  assert.ok(prompt.includes("'$$'"), "context $$ must survive verbatim");
+  assert.ok(prompt.includes("'$1'"), "context $1 must survive verbatim");
+  assert.ok(prompt.includes("retry on $& $$ $1"), "retryHint replacement tokens must survive verbatim");
+});
+
 test("buildReviewPrompt: empty focus renders as literal '(no additional focus provided)'", () => {
   const prompt = buildReviewPrompt({
     schemaPath: SCHEMA_PATH,
