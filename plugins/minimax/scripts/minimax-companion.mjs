@@ -16,6 +16,7 @@ import {
   classifyMiniAgentResult,
   stripAnsiSgr,
   callMiniAgentReview,
+  callMiniAgentAdversarial,
 } from "./lib/minimax.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
 import {
@@ -57,6 +58,17 @@ Subcommands:
                       2 = no diff / no base / bad scope / merge conflict present
                       4 = mini-agent call failed
                       5 = parse/validate failed even after 1 retry
+                      6 = git command failed
+
+  adversarial-review [--json] [--base <ref>] [--scope <auto|working-tree|staged|branch>]
+                     [--timeout <ms>] [--cwd <path>] [focus ...]
+                    Two-pass adversarial review (red team then blue team) on the
+                    current git diff. Both viewpoints must succeed (T9 hard gate).
+                    Exit codes:
+                      0 = both red and blue succeeded
+                      2 = no diff / no base / bad scope / merge conflict present
+                      4 = mini-agent call failed on either side (or queue-timeout)
+                      5 = parse/validate failed on either side
                       6 = git command failed
 
   rescue [--json] [--sandbox] [--background] [--timeout <ms>] [--cwd <path>]
@@ -482,6 +494,208 @@ async function runReview(rawArgs) {
   }
 }
 
+// ── Task 5.4: runAdversarialReview (dual-stance red+blue, single queue slot) ─
+
+const ADVERSARIAL_STATUS_EXIT = {
+  "no-diff": 2,
+  "no-base": 2,
+  "bad-scope": 2,
+  "merge-conflict-present": 2,
+  "git-diff-failed": 6,
+  "call-failed": 4,
+  "parse-validate-failed": 5,
+};
+
+async function runAdversarialReview(rawArgs) {
+  const { options, positionals } = parseArgs(rawArgs, {
+    booleanOptions: ["json"],
+    valueOptions: ["timeout", "cwd", "base", "scope"],
+  });
+
+  const cwd = options.cwd || process.cwd();
+  const base = options.base || null;
+  const scope = options.scope || "auto";
+  const focus = positionals.join(" ").trim();
+  const timeout = options.timeout ? Number(options.timeout) : 120_000;
+
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    if (options.json) {
+      process.stdout.write(JSON.stringify({ status: "bad-input", reason: `invalid --timeout '${options.timeout}'` }) + "\n");
+    } else {
+      process.stderr.write(`Error: invalid --timeout '${options.timeout}'\n`);
+    }
+    process.exit(1);
+  }
+
+  const diffResult = collectDiff({ base, scope, cwd });
+  if (!diffResult.ok) {
+    const exitCode = ADVERSARIAL_STATUS_EXIT[diffResult.reason] ?? 6;
+    const payload = { status: diffResult.reason, detail: diffResult.detail };
+    if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    else process.stderr.write(`Error: ${diffResult.reason} -- ${diffResult.detail}\n`);
+    process.exit(exitCode);
+  }
+  if (!diffResult.diff.trim()) {
+    const payload = { status: "no-diff", detail: `scope=${diffResult.scope} yielded empty diff` };
+    if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    else process.stdout.write(`No changes under scope=${diffResult.scope}; nothing to adversarially review.\n`);
+    process.exit(2);
+  }
+
+  if (!options.json) {
+    process.stdout.write(`Adversarial review (scope=${diffResult.scope}${base ? ", base=" + base : ""}, focus="${focus || "(none)"}")...\n`);
+    // v2 (I14): cold start ~10s (P0.1 实测); 双 spawn 总 ~50-90s 主路径
+    // v2 (I15): 显式 UX 提示 queue slot 持有窗口
+    process.stdout.write("Starting MiniMax red team (cold start ~10s; full red+blue ~50-90s)...\n");
+    process.stdout.write("Queue slot held for adversarial-review (~60s typical, up to ~120s with retries); other /minimax:* commands will wait.\n");
+    // v0.2 TODO (M11): consider --single-spawn / --fast flag for cold-start-sensitive use
+  }
+
+  const schemaPath = path.resolve(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas", "review-output.schema.json")
+  );
+
+  const onProgressLine = options.json ? undefined : (line) => {
+    process.stderr.write(stripAnsiSgr(line) + "\n");
+  };
+
+  // D5.3: hold a single queue slot across both red and blue spawns + each side's
+  // 1-shot retry. Worst case: 2 stances × 2 spawns each = 4 × timeout.
+  //
+  // v2 (I7): cwd is shared across both spawns. Adversarial-review prompts are
+  // explicitly read-only (prompts/adversarial-review.md 末尾声明 "本任务是只读
+  // 审查...只输出 JSON"), but Mini-Agent's file-write tool is not blocked at the
+  // runtime level. If the model violates the prompt and writes a file, blue
+  // stance's spawn will read the polluted cwd. Acceptable for v0.1; tripwire
+  // (minimax-result-handling SKILL §suspicious bash) catches obvious abuse.
+  const workspaceRoot = defaultWorkspaceRoot();
+  const slot = await acquireQueueSlot(workspaceRoot, { maxWaitMs: timeout * 4 + 30_000 });
+  if (!slot.acquired) {
+    const payload = { status: "queue-timeout", reason: slot.reason };
+    if (options.json) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    else process.stderr.write(`Error: queue-timeout (${slot.reason})\n`);
+    process.exit(4);
+  }
+
+  let r;
+  try {
+    r = await callMiniAgentAdversarial({
+      context: diffResult.diff,
+      focus,
+      schemaPath,
+      cwd,
+      timeout,
+      onProgressLine,
+    });
+  } finally {
+    releaseQueueSlot(workspaceRoot, slot.token);
+  }
+
+  if (r.ok) {
+    if (options.json) {
+      process.stdout.write(JSON.stringify({
+        status: "ok",
+        red: pickViewpointPayload(r.red),
+        blue: pickViewpointPayload(r.blue),
+      }, null, 2) + "\n");
+    } else {
+      renderViewpointText("Red Team", r.red);
+      process.stdout.write("\n");
+      renderViewpointText("Blue Team", r.blue);
+      const cfg = readMiniAgentConfig();
+      const footerParts = [];
+      if (cfg.model) footerParts.push(`model: ${cfg.model}`);
+      if (r.red.logPath) footerParts.push(`red-log: ${r.red.logPath}`);
+      if (r.blue.logPath) footerParts.push(`blue-log: ${r.blue.logPath}`);
+      if (r.red.retry_used) footerParts.push("red-retry-used");
+      if (r.blue.retry_used) footerParts.push("blue-retry-used");
+      if (footerParts.length) process.stdout.write(`(${footerParts.join(" · ")})\n`);
+    }
+    process.exit(0);
+  } else {
+    const failedSide = r.side === "red" ? r.red : r.blue;
+    const reason = failedSide.diagnostic ? "call-failed" : "parse-validate-failed";
+    const exitCode = ADVERSARIAL_STATUS_EXIT[reason] ?? 5;
+    if (options.json) {
+      process.stdout.write(JSON.stringify({
+        status: reason,
+        side: r.side,
+        error: r.error,
+        red: r.red ? pickViewpointPayload(r.red) : null,
+        blue: r.blue ? pickViewpointPayload(r.blue) : null,
+        firstRawText: failedSide.firstRawText ?? null,
+        rawText: failedSide.rawText ?? null,
+        parseError: failedSide.parseError ?? null,
+        diagnostic: failedSide.diagnostic ?? null,
+      }, null, 2) + "\n");
+    } else {
+      process.stderr.write(`Error: ${reason} (${r.side} team) -- ${r.error}\n`);
+      if (failedSide.diagnostic && failedSide.diagnostic.stderrHeadTail) {
+        process.stderr.write(`\n--- diagnostic (${r.side} stderr head+tail) ---\n${failedSide.diagnostic.stderrHeadTail}\n`);
+      }
+      if (failedSide.firstRawText) process.stderr.write(`\n(${r.side} first raw response, redacted, truncated)\n${failedSide.firstRawText.slice(0, 1500)}\n`);
+      if (failedSide.rawText) process.stderr.write(`\n(${r.side} retry raw response, redacted, truncated)\n${failedSide.rawText.slice(0, 1500)}\n`);
+      if (r.side === "blue" && r.red?.ok) {
+        process.stderr.write(`\n(red team succeeded; rerun for blue. Red verdict: ${r.red.verdict})\n`);
+      }
+    }
+    process.exit(exitCode);
+  }
+}
+
+function pickViewpointPayload(v) {
+  if (!v.ok) {
+    return {
+      ok: false,
+      error: v.error,
+      retry_used: v.retry_used,
+      retriedOnce: v.retriedOnce,
+    };
+  }
+  return {
+    ok: true,
+    verdict: v.verdict,
+    summary: v.summary,
+    findings: v.findings,
+    next_steps: v.next_steps,
+    retry_used: v.retry_used,
+    retriedOnce: v.retriedOnce,
+    retry_notice: v.retry_notice,
+    truncated: v.truncated,
+    logPath: v.logPath,
+  };
+}
+
+function renderViewpointText(label, v) {
+  process.stdout.write(`=== ${label} ===\n`);
+  if (!v.ok) {
+    process.stdout.write(`(${label} failed: ${v.error})\n`);
+    return;
+  }
+  process.stdout.write(`Verdict: ${v.verdict}\n`);
+  process.stdout.write(`Summary: ${v.summary}\n`);
+  const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+  const findings = [...v.findings].sort((a, b) => (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99));
+  if (findings.length === 0) {
+    process.stdout.write("Findings: (none)\n");
+  } else {
+    process.stdout.write(`Findings (${findings.length}):\n`);
+    for (const f of findings) {
+      process.stdout.write(`  - [${f.severity}] ${f.title}\n`);
+      process.stdout.write(`    ${f.file}:${f.line_start}${f.line_end !== f.line_start ? "-" + f.line_end : ""}  (confidence ${f.confidence})\n`);
+      process.stdout.write(`    ${f.body}\n`);
+      process.stdout.write(`    fix: ${f.recommendation}\n`);
+    }
+  }
+  if (v.next_steps.length) {
+    process.stdout.write("Next steps:\n");
+    for (const s of v.next_steps) process.stdout.write(`  - ${s}\n`);
+  }
+  if (v.retry_used) {
+    process.stdout.write(`(${label}: retry used -- ${v.retry_notice})\n`);
+  }
+}
+
 // ── Task 4.4/4.5: runRescue (foreground + --background) ──────────────────
 
 async function runRescue(rawArgs) {
@@ -858,6 +1072,8 @@ async function main() {
       return await runAsk(rest);
     case "review":
       return await runReview(rest);
+    case "adversarial-review":
+      return await runAdversarialReview(rest);
     case "rescue":
       return await runRescue(rest);
     case "status":
