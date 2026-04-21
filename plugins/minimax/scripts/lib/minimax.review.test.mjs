@@ -252,6 +252,22 @@ test("buildReviewPrompt: no previousRaw means no 'Previous response' heading (v2
   assert.ok(!prompt.includes("## Previous response"));
 });
 
+test("buildReviewPrompt: previousRaw containing literal {{CONTEXT}} does NOT poison substitution (M2 v0.1.1, mirror)", () => {
+  // Mirror the adversarial prompt regression: a prior model response can
+  // mention "{{CONTEXT}}" as literal prose and must not steal the real slot.
+  const previous = "I confused the {{CONTEXT}} placeholder with literal text.";
+  const out = buildReviewPrompt({
+    schemaPath: SCHEMA_PATH,
+    focus: "",
+    context: "REAL_DIFF_PAYLOAD",
+    retryHint: "schema validation errors: bad type",
+    previousRaw: previous,
+  });
+  assert.ok(out.includes("REAL_DIFF_PAYLOAD"), "real context payload must reach the {{CONTEXT}} slot");
+  assert.ok(out.includes("{{CONTEXT}}"), "previousRaw's literal {{CONTEXT}} must survive verbatim");
+  assert.ok(!out.includes("__MINIMAX_CONTEXT_SLOT__"), "internal sentinel must not leak");
+});
+
 test("buildReviewPrompt: focus containing literal {{CONTEXT}} is preserved as user data (M2 v0.1.1)", () => {
   // After v0.1.1 M2 fix: real {{CONTEXT}} slot is swapped to a sentinel BEFORE
   // any user-supplied placeholder substitution. So focus / retryHint / previousRaw
