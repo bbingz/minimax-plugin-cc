@@ -75,6 +75,8 @@ Phase 4 review 提到的已知限制：cancelJob 用 `kill(pid, 0)` 检活，OS 
 ### 坑 11: 单 prompt 同时要求红+蓝 findings → 模型偏向最后 stance
 Phase 5 早期实验：单 spawn 让模型同时产 red+blue findings，60% 概率红队 findings 极稀疏；T9 抖动严重。改为双 spawn 架构（同 queue slot 内顺序跑），红蓝各自独立 1-shot retry 预算，T9 稳定。kimi-plugin-cc 通过单 stance 设计（仅红队）天然规避此坑；minimax 因双 stance 需求采用双 spawn。Phase 5 5-way review (Kimi I9) 进一步指出：中文 stance 措辞若过于"激将"（"击破"等情绪词），M2.7 可能产生过度对抗性幻觉；T9 smoke 后需观察红队 critical 比例，若 >70% 标 critical 则启动措辞降级预案（"击破" → "严格审视"）。
 
+**坑 11 延伸（T9 smoke 实测，2026-04-21）**：T9 fixture（fetch-no-error-handling）红队产出 100% critical（2/2），触发 I9 观察阈值。但两个 finding 都是实质技术 bug（"network failure → TypeError crash" / "HTTP error → silent JSON"），confidence 0.95，有具体 line + 具体 recommendation，**不是**激将语言诱发的过度对抗性幻觉。结论：本次样本不触发措辞降级预案；样本量太小（n=2）不构成统计依据；保留 I9 监测，多 fixture 样本积累后再判（详见 `doc/smoke/phase-5-T9.md`）。
+
 ### 坑 12: skill SKILL.md 不应放历史流水帐
 Phase 5 5-way review (Gemini C7)：原计划在 `minimax-cli-runtime/SKILL.md` 末尾追加 "Phase 4-5 deltas" 段，被 review 否决。SKILL.md 是 LLM 上下文消费品，每次 spawn 都加载到 prompt 里，加历史段是无谓 token 浪费。规则：SKILL.md 只描述当前事实契约；版本演进史和阶段交付清单写在 CHANGELOG.md / lessons.md。
 
