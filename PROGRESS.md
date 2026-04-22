@@ -135,6 +135,16 @@ v0.1.3's `TimingAccumulator` emits these fields as `null` / `[]` and documents t
 
 ## Re-alignment signal → gemini-plugin-cc
 
+**Status: CLOSED 2026-04-22** — Gemini confirmed re-alignment complete, all 4 axes PASS. Landed on their side as `gemini-plugin-cc@cf65036` (branch `alignment/loop-close-2026-04-22`, PR #1, 7 commits). Full pass recorded in their `docs/alignment/minimax.md §10`. Original P0 / P2 / P3 CLOSED; P1 downgraded from "gap" → "architectural constraint" (Gemini will NOT re-raise in future baselines until Mini-Agent upstream changes); P4 N/A by design. Axis 4 (`CLAUDE_PLUGIN_DATA` caveat) UPTAKE as design principle #8 in their `baseline.md §10`, credited to minimax T14.
+
+**Future triggers (no action required until one fires):**
+- Mini-Agent upstream exposes `served_model` / token `usage` / per-line timestamps → ping Gemini to re-evaluate P1 unlock. `TimingAccumulator` reserved no-op methods (onFirstToken / onLastToken / onToolUseStart / onToolResult / onRetryStart / onRetryEnd / onStartupStats / onResult) remain as forward-compat scaffolding — wiring in when upstream ships requires no restructure.
+- Once `kimi-plugin-cc` ships v0.2 P1 (timing): 3-way cross-plugin byte-level compare of `timings.ndjson` shapes (gemini 6-term, minimax 3-term, kimi TBD). `invariantKind` discriminator is the anchor pattern; kimi will pick "6term" or "3term" based on what kimi-cli 1.37 can actually expose. Non-blocker suggestion from Gemini.
+
+---
+
+**Original signal (historical — sent 2026-04-22 at ship time):**
+
 v0.1.3 shipped 2026-04-22 (tag `v0.1.3` — https://github.com/bbingz/minimax-plugin-cc/releases/tag/v0.1.3). Ready for Gemini re-alignment per `/Users/bing/-Code-/gemini-plugin-cc/docs/alignment/minimax.md §9`'s three axes + one new axis surfaced by T14 review:
 
 1. **ndjson schema compat**: field names mirror `gemini/plugins/gemini/scripts/lib/timing.mjs::build()` output EXCEPT three semantic-drift fields documented in `docs/superpowers/specs/2026-04-22-v0.1.3-timing-cleanup-upstream.md §4 compat callout` — `firstEventMs` measures Mini-Agent CLI boot (Python+click+skill-metadata), `streamMs` is stdout-line bracket and silently absorbs 1+2+4s internal retries, `retryMs` null by design. Invariant discriminator `invariantKind: "3term"` (vs Gemini's 6-term) lets cross-plugin tools branch. `usage: []` (array, not null) matches Gemini shape.
