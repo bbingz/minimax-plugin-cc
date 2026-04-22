@@ -119,7 +119,19 @@ Current: **82 pass / 0 fail** (as of v0.1.0; was 79 at `phase-4-rescue` baseline
 
 1. Add coarse timing telemetry for Mini-Agent-backed runs.
 2. Add stale-job cleanup to `session-lifecycle-hook.mjs`.
-3. Open/track an upstream Mini-Agent request for served-model logging.
+3. ~~Open/track an upstream Mini-Agent request for served-model logging.~~ — **dropped 2026-04-22**: decision is to absorb the limitation internally rather than file an upstream issue. See "Upstream limitations (accepted)" below.
+
+## Upstream limitations (accepted)
+
+Mini-Agent 0.1.0's log RESPONSE block does NOT expose the following. We note these as accepted constraints, NOT as open tickets:
+
+- `served_model` (would enable silent-fallback detection) — not present; we record `requestedModel` from our own `config.yaml` only
+- `usage` (input/output/thoughts token counts) — not present; downstream `tokensPerSec` cannot be computed
+- per-line timestamps — not present; downstream `ttftMs`/`toolMs`/`retryMs` cannot be measured, silent auto-retries absorbed into `streamMs`
+
+v0.1.3's `TimingAccumulator` emits these fields as `null` / `[]` and documents the gap in `spec §4 compat callout`. Forward-compat scaffolding (reserved no-op methods in `TimingAccumulator`) is in place so if upstream behavior changes in a future Mini-Agent release we can wire stream events without restructuring the class.
+
+**Not open as an upstream issue** — user decision, 2026-04-22. Re-visit if/when upstream behavior visibly changes.
 
 ## v0.1.0 shipped
 
