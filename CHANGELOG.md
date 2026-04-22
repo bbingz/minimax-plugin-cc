@@ -1,7 +1,7 @@
 
 ## 2026-04-22 [Claude opus controller] — v0.1.3 — timing + SessionStart cleanup + upstream absorbed
 
-- **status**: done (code + tests + docs; T14 real-Mini-Agent smoke pending user-side verification before tag)
+- **status**: done (code + tests + docs + T14 real-Mini-Agent smoke 11/11 PASS; ready for tag)
 - **scope**: per spec `docs/superpowers/specs/2026-04-22-v0.1.3-timing-cleanup-upstream.md` v2.1:
   - `lib/timing.mjs`: `TimingAccumulator` class (field names mirror gemini-plugin-cc, `invariantKind: "3term"` discriminator) + `percentile` / `computeAggregateStats` / `filterHistory` / render helpers (history table / aggregate / one-liner)
   - `lib/state.mjs::appendTimingHistory` (O_EXCL lock, 10 MB cap + half-trim retention, crash-recovery leading `\n`, separate `TIMING_FALLBACK_DIR` so telemetry lands at Gemini-compat path, not jobs' tmpdir)
@@ -16,8 +16,10 @@
   - `usage: []` (not null) — matches Gemini's `this._usage || []` so downstream `.length` / `.map()` stay safe. Empty until upstream adds `served_model` (which we chose not to request).
   - `fallback rate` renders `—` (not `0.0%`) when no record has populated `usage` — avoids misleading "no fallback detected" vs true "cannot detect".
   - 6-way spec review (11 Critical + 17 High + 11 Medium) + 3-way sanity (5 new H + 2 M) + 3-way plan review (5 Critical + 7 High) all folded before execution.
-- **tests**: 133 pass / 0 fail (prior 86 + timing 22 + state 6 + hook 13 + adversarial D7 integration 1 + callMiniAgent regression 1 + other extras = +47). Full test paths: `plugins/minimax/scripts/lib/*.test.mjs` + `plugins/minimax/scripts/session-lifecycle-hook.test.mjs`.
-- **next**: T14 real-Mini-Agent smoke (user-run 11 assertions) → tag `v0.1.3` → push → `gh release create` → Gemini re-alignment signal in PROGRESS.md.
+- **tests**: 137 pass / 0 fail (prior 86 + timing 22 + state 6 + hook 13 + adversarial D7 integration 1 + callMiniAgent regression 1 + other extras = +47; + T14 follow-up +4: 2 jobId truncation + 2 adv-kind abbreviation). Full test paths: `plugins/minimax/scripts/lib/*.test.mjs` + `plugins/minimax/scripts/session-lifecycle-hook.test.mjs`.
+- **T14 smoke**: PASS 11/11 against real Mini-Agent 0.1.0 + MiniMax-M2.7-highspeed (`doc/smoke/phase-6-T14.md`). Kinds exercised: ask×3, rescue×1, adversarial-red×1, adversarial-blue×1.
+- **T14 follow-up**: three cosmetic/doc fixes post-smoke (non-blocking, folded into v0.1.3 before tag) — jobId column truncation (`renderHistoryTable` padEnd(16) was insufficient for 38-char UUIDs), portable `touch -t` in spec/plan Step 7/8 (BSD macOS had no `touch -d 'N days ago'`), adversarial-red/blue abbreviated to `adv-red`/`adv-blue` with kind col widened 8→9 so total column no longer collides.
+- **next**: tag `v0.1.3` → push `origin main --follow-tags` → `gh release create v0.1.3` → Gemini re-alignment signal in PROGRESS.md (incl. CLAUDE_PLUGIN_DATA sibling-plugin env-inheritance caveat per Gemini Finding 2).
 
 ## 2026-04-22 04:30 [Claude opus controller] — v0.1.2 patch — review fixes + release prep
 

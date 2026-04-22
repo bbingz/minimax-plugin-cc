@@ -7,7 +7,8 @@
 - **Cleanup hook**: SessionEnd per-session terminal cleanup (sessionId filter). SessionStart mtime-based sweep with 4 decision branches: terminal / non-terminal+dead-pid / missing-meta / corrupt-meta-with-fresh-skip. `MINIMAX_STALE_JOB_THRESHOLD_MS` env override, 3-day default.
 - **ndjson retention**: 10 MB cap, half-trim on overflow, O_EXCL lock with 10s acquire + 30s stale-reclaim, crash-recovery prepends `\n` on next append.
 - **Upstream Mini-Agent issue**: deliberately NOT filed; limitations (`served_model` / token `usage` / per-line timestamps absent) absorbed internally. `TimingAccumulator` reserved no-op methods stay as forward-compat scaffolding for future upstream changes.
-- **Tests**: 133 pass / 0 fail.
+- **Tests**: 137 pass / 0 fail (133 initial + 4 T14 follow-up: 2 jobId truncation + 2 adversarial kind abbreviation).
+- **T14 smoke**: 11/11 PASS against real Mini-Agent 0.1.0 + MiniMax-M2.7-highspeed. See `doc/smoke/phase-6-T14.md`.
 
 ## 2026-04-22 — v0.1.2 (review hardening + release)
 
