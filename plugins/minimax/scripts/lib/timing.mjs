@@ -183,3 +183,79 @@ export function filterHistory(records, { kind, last, since } = {}) {
   if (last) out = out.slice(0, last);
   return out;
 }
+
+// ─── Render helpers ───────────────────────────────────────────────────────────
+
+export function formatMs(ms) {
+  if (ms == null) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const min = Math.floor(ms / 60_000);
+  const sec = Math.floor((ms % 60_000) / 1000);
+  return `${min}m ${sec}s`;
+}
+
+export function renderHistoryTable(rows) {
+  const lines = [];
+  // `cliBoot` label replaces Gemini's `cold` (spec §7) — firstEventMs measures
+  // Mini-Agent CLI boot (Python+click+skill-metadata), NOT model TTFT.
+  lines.push("id              kind    total      cliBoot  ttft    gen     tool    retry   tok/s   fb   completedAt");
+  for (const r of rows) {
+    const t = r.timing || {};
+    const usage = Array.isArray(t.usage) ? t.usage : [];
+    const fb = usage.length === 0 ? "—" : usage.length > 1 ? "y" : "n";
+    lines.push([
+      (r.jobId || "?").padEnd(16),
+      (r.kind || "?").padEnd(8),
+      formatMs(t.totalMs).padEnd(10),
+      formatMs(t.firstEventMs).padEnd(9),
+      formatMs(t.ttftMs).padEnd(8),
+      formatMs(t.streamMs).padEnd(8),
+      formatMs(t.toolMs).padEnd(8),
+      formatMs(t.retryMs).padEnd(8),
+      (t.tokensPerSec != null ? String(t.tokensPerSec) : "—").padEnd(8),
+      fb.padEnd(5),
+      (r.ts || "—").slice(0, 19),
+    ].join(""));
+  }
+  return lines.join("\n");
+}
+
+export function renderAggregateTable(stats, { kind = "all" } = {}) {
+  const lines = [];
+  lines.push(`${kind} (n=${stats.n})`);
+  lines.push(`                   cliBoot     ttft        gen         tool        retry       total`);
+  for (const p of ["p50", "p95", "p99"]) {
+    const row = stats.percentiles[p];
+    if (!row) {
+      lines.push(`  ${p.padEnd(14)}  —           —           —           —           —           —`);
+      continue;
+    }
+    const cells = METRICS
+      .map((m) => formatMs(row[m]).padEnd(12))
+      .join("");
+    lines.push(`  ${p.padEnd(14)}  ${cells}`);
+  }
+  if (stats.slowest) {
+    const fb = stats.slowest.fallback ? " · fallback" : "";
+    lines.push(`  slowest         ${stats.slowest.jobId} · ${formatMs(stats.slowest.totalMs)}${fb}`);
+  }
+  if (stats.usageAvailable) {
+    lines.push(`  fallback rate   ${(stats.fallbackRate * 100).toFixed(1)}%`);
+  } else {
+    lines.push(`  fallback rate   —          (usage unavailable; upstream dependency — see PROGRESS.md §Upstream limitations)`);
+  }
+  return lines.join("\n");
+}
+
+export function renderStatusSummaryLine(timing) {
+  if (!timing) return "—";
+  const parts = [];
+  if (timing.firstEventMs != null) parts.push(`cliBoot ${formatMs(timing.firstEventMs)}`);
+  if (timing.ttftMs != null)       parts.push(`ttft ${formatMs(timing.ttftMs)}`);
+  if (timing.streamMs != null)     parts.push(`gen ${formatMs(timing.streamMs)}`);
+  if (timing.toolMs > 0)           parts.push(`tool ${formatMs(timing.toolMs)}`);
+  if (timing.retryMs > 0)          parts.push(`retry ${formatMs(timing.retryMs)}`);
+  if (timing.tokensPerSec != null) parts.push(`${timing.tokensPerSec} tok/s`);
+  return parts.join(" · ");
+}

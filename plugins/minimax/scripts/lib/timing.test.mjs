@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   TimingAccumulator, dispatchTimingEvent,
   percentile, computeAggregateStats, filterHistory,
+  formatMs, renderHistoryTable, renderAggregateTable, renderStatusSummaryLine,
 } from "./timing.mjs";
 
 const mkRecord = ({ kind = "ask", ts = "2026-04-22T10:00:00.000Z", jobId = "mj-X", timing = {} }) => ({
@@ -209,4 +210,61 @@ test("filterHistory: kind 'all' passes through all records", () => {
   const recs = [mkRecord({ kind: "ask" }), mkRecord({ kind: "review" })];
   const out = filterHistory(recs, { kind: "all" });
   assert.equal(out.length, 2);
+});
+
+test("formatMs: units", () => {
+  assert.equal(formatMs(null), "—");
+  assert.equal(formatMs(500), "500ms");
+  assert.equal(formatMs(1500), "1.5s");
+  assert.equal(formatMs(65_500), "1m 5s");
+});
+
+test("renderHistoryTable: uses cliBoot header; null fields render '—'", () => {
+  const rows = [mkRecord({ kind: "ask", timing: { firstEventMs: 156, streamMs: 12_800, tailMs: 76, totalMs: 13_032 } })];
+  const out = renderHistoryTable(rows);
+  assert.ok(out.includes("cliBoot"), "header must use 'cliBoot'");
+  assert.ok(out.includes("156ms"));
+  assert.ok(out.includes("—"), "null fields render as '—'");
+  assert.ok(!out.match(/\bcold\b/), "literal 'cold' column header is removed");
+});
+
+test("renderHistoryTable: empty input returns header only", () => {
+  const out = renderHistoryTable([]);
+  assert.ok(out.includes("cliBoot"));
+  assert.equal(out.trim().split("\n").length, 1);
+});
+
+test("renderAggregateTable: fallback rate renders '—' when usageAvailable false", () => {
+  const stats = {
+    n: 5,
+    percentiles: { p50: { firstEventMs: 100, ttftMs: null, streamMs: 1000, toolMs: null, retryMs: null, totalMs: 1150 }, p95: null, p99: null },
+    slowest: { jobId: "mj-X", totalMs: 1500, fallback: false },
+    fallbackCount: 0, fallbackRate: 0, usageAvailable: false,
+  };
+  const out = renderAggregateTable(stats, { kind: "ask" });
+  assert.ok(out.includes("n=5"));
+  assert.ok(/fallback rate\s+—/.test(out), "renders em-dash when upstream usage unavailable");
+  assert.ok(!out.match(/fallback rate\s+0\.0%/), "must NOT render 0.0% (misleading)");
+});
+
+test("renderAggregateTable: fallback rate renders percentage when usage available", () => {
+  const stats = {
+    n: 10, percentiles: { p50: null, p95: null, p99: null },
+    slowest: null, fallbackCount: 1, fallbackRate: 0.1, usageAvailable: true,
+  };
+  const out = renderAggregateTable(stats, { kind: "ask" });
+  assert.ok(/fallback rate\s+10\.0%/.test(out));
+});
+
+test("renderStatusSummaryLine: null timing returns em-dash", () => {
+  assert.equal(renderStatusSummaryLine(null), "—");
+});
+
+test("renderStatusSummaryLine: populated fields only", () => {
+  const out = renderStatusSummaryLine({
+    firstEventMs: 156, ttftMs: null, streamMs: 12_800, toolMs: 0, retryMs: 0, tokensPerSec: null,
+  });
+  assert.ok(out.includes("cliBoot 156ms"));
+  assert.ok(out.includes("gen 12.8s"));
+  assert.ok(!out.includes("ttft"));
 });
