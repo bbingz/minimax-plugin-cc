@@ -12,6 +12,16 @@ const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
 
+// ── Timing history constants (v0.1.3) ────────────────────
+// Separate from FALLBACK_STATE_ROOT_DIR (which is tmpdir-based for jobs).
+// Telemetry lives at Gemini-compat path so cross-plugin tooling finds it.
+const TIMING_FALLBACK_DIR = path.join(os.homedir(), ".claude", "plugins", "data", "minimax-minimax-plugin");
+const TIMING_FILE_NAME = "timings.ndjson";
+const TIMING_LOCK_NAME = "timings.ndjson.lock";
+const TIMING_LOCK_ACQUIRE_MS = 10_000;
+const TIMING_LOCK_STALE_MS = 30_000;
+const TIMING_MAX_BYTES = 10 * 1024 * 1024;
+
 // ── Path resolution ──────────────────────────────────────
 
 function computeWorkspaceSlug(workspaceRoot) {
@@ -334,5 +344,103 @@ export async function withLockAsync(lockPath, asyncFn) {
     return await asyncFn();
   } finally {
     try { fs.unlinkSync(lockPath); } catch { /* already cleaned up or never created, ignore */ }
+  }
+}
+
+// ── Timing history (v0.1.3) ──────────────────────────────
+
+function resolveTimingDir() {
+  const pluginData = process.env[PLUGIN_DATA_ENV];
+  return pluginData || TIMING_FALLBACK_DIR;
+}
+
+export function resolveTimingHistoryFile() {
+  return path.join(resolveTimingDir(), TIMING_FILE_NAME);
+}
+
+function resolveTimingLockFile() {
+  return path.join(resolveTimingDir(), TIMING_LOCK_NAME);
+}
+
+function removeTimingLock() {
+  try { fs.unlinkSync(resolveTimingLockFile()); } catch { /* already gone */ }
+}
+
+function acquireTimingLockSync() {
+  const lockFile = resolveTimingLockFile();
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  const deadline = Date.now() + TIMING_LOCK_ACQUIRE_MS;
+  while (Date.now() < deadline) {
+    try {
+      const fd = fs.openSync(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+      fs.closeSync(fd);
+      return lockFile;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      const until = Date.now() + 25;
+      while (Date.now() < until) { /* spin */ }
+      try {
+        const st = fs.statSync(lockFile);
+        if (Date.now() - st.mtimeMs > TIMING_LOCK_STALE_MS) {
+          try { fs.unlinkSync(lockFile); } catch { /* gone */ }
+        }
+      } catch { /* gone */ }
+    }
+  }
+  return null;
+}
+
+/**
+ * Append a timing record to timings.ndjson.
+ * Returns true on success, false on lock-acquire timeout.
+ * May THROW from pre-lock paths (EACCES on mkdirSync/statSync) or from renameSync
+ * during trim (EACCES/EXDEV). Callers MUST try/catch. See spec §6.
+ */
+export function appendTimingHistory(record) {
+  const file = resolveTimingHistoryFile();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const lock = acquireTimingLockSync();
+  if (!lock) {
+    try { process.stderr.write(`[timing] lock acquire timeout; dropping record ${record?.jobId || "?"}\n`); } catch { /* ignore */ }
+    return false;
+  }
+  try {
+    // Crash recovery: if file exists without trailing \n, prepend one before append
+    let needsLeadingNewline = false;
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 0) {
+        const buf = Buffer.alloc(1);
+        const fd = fs.openSync(file, "r");
+        try { fs.readSync(fd, buf, 0, 1, st.size - 1); }
+        finally { fs.closeSync(fd); }
+        if (buf[0] !== 0x0A /* \n */) needsLeadingNewline = true;
+      }
+    } catch { /* new file */ }
+
+    const line = (needsLeadingNewline ? "\n" : "") + JSON.stringify(record) + "\n";
+    fs.appendFileSync(file, line);
+
+    // Retention best-effort; if trim fails the record IS already appended.
+    try {
+      const st = fs.statSync(file);
+      if (st.size > TIMING_MAX_BYTES) {
+        const raw = fs.readFileSync(file, "utf8");
+        const lines = raw.split("\n").filter(Boolean);
+        const valid = [];
+        for (const l of lines) {
+          try { JSON.parse(l); valid.push(l); } catch { /* drop invalid */ }
+        }
+        const keep = valid.slice(Math.floor(valid.length / 2));
+        const tmp = file + ".tmp";
+        fs.writeFileSync(tmp, keep.join("\n") + "\n");
+        fs.renameSync(tmp, file);
+      }
+    } catch (e) {
+      try { process.stderr.write(`[timing] trim failed (record already appended): ${e.message}\n`); } catch { /* ignore */ }
+    }
+    return true;
+  } finally {
+    removeTimingLock();
   }
 }
