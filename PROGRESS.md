@@ -133,6 +133,18 @@ v0.1.3's `TimingAccumulator` emits these fields as `null` / `[]` and documents t
 
 **Not open as an upstream issue** — user decision, 2026-04-22. Re-visit if/when upstream behavior visibly changes.
 
+## Re-alignment signal → gemini-plugin-cc
+
+v0.1.3 shipped 2026-04-22 (tag `v0.1.3` — https://github.com/bbingz/minimax-plugin-cc/releases/tag/v0.1.3). Ready for Gemini re-alignment per `/Users/bing/-Code-/gemini-plugin-cc/docs/alignment/minimax.md §9`'s three axes + one new axis surfaced by T14 review:
+
+1. **ndjson schema compat**: field names mirror `gemini/plugins/gemini/scripts/lib/timing.mjs::build()` output EXCEPT three semantic-drift fields documented in `docs/superpowers/specs/2026-04-22-v0.1.3-timing-cleanup-upstream.md §4 compat callout` — `firstEventMs` measures Mini-Agent CLI boot (Python+click+skill-metadata), `streamMs` is stdout-line bracket and silently absorbs 1+2+4s internal retries, `retryMs` null by design. Invariant discriminator `invariantKind: "3term"` (vs Gemini's 6-term) lets cross-plugin tools branch. `usage: []` (array, not null) matches Gemini shape.
+
+2. **SessionStart cleanup threshold**: default 3 days (matches Gemini alignment suggestion); configurable via `MINIMAX_STALE_JOB_THRESHOLD_MS` env (D4 flipped from v1 hardcoded per Gemini review). Sweep uses 4-branch decision tree (terminal / non-terminal+dead-pid / missing-meta / corrupt-meta-fresh-skip).
+
+3. **Upstream Mini-Agent issue**: deliberately NOT filed (user decision 2026-04-22). Limitations (`served_model` / token `usage` / per-line timestamps) absorbed internally and documented in §Upstream limitations above. `TimingAccumulator` reserved no-op methods stay as forward-compat scaffolding for any future Mini-Agent change.
+
+4. **NEW — `CLAUDE_PLUGIN_DATA` sibling-plugin env-inheritance caveat** (Gemini Finding 2, T14 review 2026-04-22): when a user session has both `minimax-plugin-cc` and sibling plugins (`qwen-plugin-cc` / `kimi-plugin-cc`) active, the shell-inherited `CLAUDE_PLUGIN_DATA` env var can point at any one sibling's data dir — whichever was set last wins. T14 smoke had to `export CLAUDE_PLUGIN_DATA=...` on every command to override an inherited qwen path (accidentally wiped qwen's regenerable `timings.ndjson` during baseline `rm`). This is a **sibling-generic baseline concern** — suggest gemini-plugin-cc's `baseline.md` document this inheritance trap (either namespace env var per-plugin like `MINIMAX_PLUGIN_DATA` / `GEMINI_PLUGIN_DATA`, or document the need for per-command explicit override in docs/cross-plugin tests).
+
 ## v0.1.0 shipped
 
 Last Phase 5 work commit: `6235f60`. v0.2 路线见 `docs/superpowers/specs/2026-04-20-minimax-plugin-cc-design.md` §8.5。
