@@ -195,6 +195,11 @@ export function formatMs(ms) {
   return `${min}m ${sec}s`;
 }
 
+function truncateId(id, max = 13) {
+  if (!id) return "?";
+  return id.length <= max ? id : id.slice(0, max) + "…";
+}
+
 export function renderHistoryTable(rows) {
   const lines = [];
   // `cliBoot` label replaces Gemini's `cold` (spec §7) — firstEventMs measures
@@ -205,7 +210,7 @@ export function renderHistoryTable(rows) {
     const usage = Array.isArray(t.usage) ? t.usage : [];
     const fb = usage.length === 0 ? "—" : usage.length > 1 ? "y" : "n";
     lines.push([
-      (r.jobId || "?").padEnd(16),
+      truncateId(r.jobId).padEnd(16),
       (r.kind || "?").padEnd(8),
       formatMs(t.totalMs).padEnd(10),
       formatMs(t.firstEventMs).padEnd(9),

@@ -234,6 +234,24 @@ test("renderHistoryTable: empty input returns header only", () => {
   assert.equal(out.trim().split("\n").length, 1);
 });
 
+test("renderHistoryTable: jobId > 13 chars is truncated with '…' so kind column stays aligned", () => {
+  const long = "mj-b54d32f1-32f3-44d9-a2d2-f697c2dce723";
+  const rows = [mkRecord({ jobId: long, kind: "ask", timing: { totalMs: 1000 } })];
+  const out = renderHistoryTable(rows);
+  const dataLine = out.split("\n")[1];
+  assert.ok(!dataLine.includes(long), "full long jobId must not appear");
+  assert.ok(dataLine.includes("mj-b54d32f1-3…"), `truncated form expected; got: ${dataLine}`);
+  assert.match(dataLine, /mj-b54d32f1-3…\s{2}ask/, "exactly 2 spaces between truncated id and kind column");
+});
+
+test("renderHistoryTable: short jobId (≤13 chars) is preserved unchanged", () => {
+  const rows = [mkRecord({ jobId: "mj-short", kind: "ask", timing: { totalMs: 100 } })];
+  const out = renderHistoryTable(rows);
+  const dataLine = out.split("\n")[1];
+  assert.ok(dataLine.startsWith("mj-short"), "short id should appear verbatim");
+  assert.ok(!dataLine.includes("…"), "no truncation marker for short ids");
+});
+
 test("renderAggregateTable: fallback rate renders '—' when usageAvailable false", () => {
   const stats = {
     n: 5,
