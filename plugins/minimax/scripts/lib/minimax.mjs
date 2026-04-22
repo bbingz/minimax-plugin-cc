@@ -6,6 +6,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { binaryAvailable } from "./process.mjs";
 import { withLockAsync } from "./state.mjs";
+import { TimingAccumulator } from "./timing.mjs";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const AUTH_CHECK_TIMEOUT_MS = 30_000;
@@ -497,11 +498,22 @@ export async function callMiniAgent({
   bin = MINI_AGENT_BIN,
   logDir = MINI_AGENT_LOG_DIR,
   env,
+  jobId,  // v0.1.3: optional telemetry tag (null default for legacy callers)
+  kind,   // v0.1.3: optional telemetry tag
 } = {}) {
   if (typeof prompt !== "string" || prompt.length === 0) {
     throw new Error("callMiniAgent: prompt must be a non-empty string");
   }
   const resolvedCwd = cwd || process.cwd();
+
+  // v0.1.3: per-spawn timing. Requested model read best-effort (TOCTOU with
+  // Mini-Agent's own config read is documented in spec §13).
+  const timing = new TimingAccumulator({ spawnedAt: Date.now(), prompt });
+  try {
+    const cfg = readMiniAgentConfig();
+    if (cfg && cfg.model) timing.setRequestedModel(cfg.model);
+  } catch { /* best-effort */ }
+  let firstEventSeen = false;
 
   const beforeSet = snapshotLogDir(logDir);
 
@@ -510,6 +522,8 @@ export async function callMiniAgent({
 
   const forwardLine = (line) => {
     linesSeen += 1;
+    if (!firstEventSeen) { timing.onFirstEvent(); firstEventSeen = true; }
+    timing.onStdoutLine();
     // spec §3.3: regex-scan first 30 stdout lines for "Log file:"
     if (!capturedLogPath && linesSeen <= 30) {
       const m = line.match(/Log file:\s+(\S+\.log)/);
@@ -527,6 +541,11 @@ export async function callMiniAgent({
     timeoutMs: timeout,
     onStdoutLine: forwardLine,
   });
+  timing.onClose(Date.now(), {
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    signal: result.signal,
+  });
 
   // Fallback: stdout didn't surface logPath → diff snapshot
   let logPath = capturedLogPath;
@@ -543,6 +562,11 @@ export async function callMiniAgent({
     }
   }
 
+  // v0.1.3: responseBytes from logParse content (best-effort).
+  if (logParse?.response) {
+    timing.recordResponseBytes(Buffer.byteLength(logParse.response, "utf8"));
+  }
+
   return {
     prompt,
     cwd: resolvedCwd,
@@ -556,6 +580,10 @@ export async function callMiniAgent({
     stderrTruncated: result.stderrTruncated,
     logPath,
     logParse,
+    // v0.1.3 additions (spec §5):
+    timing: timing.build(),
+    jobId: jobId ?? null,
+    kind: kind ?? null,
   };
 }
 

@@ -290,3 +290,51 @@ test("classifyMiniAgentResult: spawn-failed for non-ENOENT spawnError", () => {
   assert.equal(r.status, "spawn-failed");
   assert.ok(r.detail && r.detail.includes("EACCES"), `expected detail to include EACCES, got: ${r.detail}`);
 });
+
+test("callMiniAgent v0.1.3: return envelope includes timing/jobId/kind; prior fields preserved", async () => {
+  const logDir = mkMockLogDir();
+  const logPath = path.join(logDir, "agent_run_20260420_104430.log");
+  fs.writeFileSync(logPath, buildLogText({ content: "hello world" }));
+  const { binPath } = mkMockMiniAgent(`#!/bin/sh
+printf 'Log file: %s\\n' "${logPath}"
+printf 'Session Statistics:\\n'
+exit 0
+`);
+
+  const result = await callMiniAgent({
+    prompt: "hello",
+    cwd: process.cwd(),
+    timeout: 15_000,
+    bin: binPath,
+    logDir,
+    jobId: "mj-regression",
+    kind: "ask",
+  });
+
+  // PRIOR return shape preserved (v0.1.2 contract):
+  for (const field of ["prompt","cwd","exitCode","signal","timedOut","spawnError","rawStdout","rawStderr","stdoutTruncated","stderrTruncated","logPath","logParse"]) {
+    assert.ok(field in result, `prior field '${field}' must still be on result`);
+  }
+  assert.equal(result.prompt, "hello");
+  assert.equal(result.exitCode, 0);
+
+  // NEW fields (v0.1.3):
+  assert.ok(result.timing, "result.timing must be present");
+  assert.equal(typeof result.timing, "object");
+  assert.equal(result.timing.invariantKind, "3term");
+  assert.equal(result.jobId, "mj-regression");
+  assert.equal(result.kind, "ask");
+  assert.ok(result.timing.responseBytes > 0, "responseBytes derived from logParse.response");
+
+  // Null defaults when tags omitted (legacy-caller compat per spec §5):
+  const legacy = await callMiniAgent({
+    prompt: "hi",
+    cwd: process.cwd(),
+    timeout: 15_000,
+    bin: binPath,
+    logDir,
+  });
+  assert.equal(legacy.jobId, null);
+  assert.equal(legacy.kind, null);
+  assert.ok(legacy.timing);
+});
