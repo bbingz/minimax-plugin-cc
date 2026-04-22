@@ -17,6 +17,8 @@ import {
   stripAnsiSgr,
   callMiniAgentReview,
   callMiniAgentAdversarial,
+  syntheticTelemetryJobId,
+  persistTimingRecord,
 } from "./lib/minimax.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
 import {
@@ -246,11 +248,13 @@ async function runAsk(rawArgs) {
     process.exit(4);
   }
   let result;
+  const askJobId = syntheticTelemetryJobId();
   try {
-    result = await callMiniAgent({ prompt, cwd, timeout, onProgressLine });
+    result = await callMiniAgent({ prompt, cwd, timeout, onProgressLine, jobId: askJobId, kind: "ask" });
   } finally {
     releaseQueueSlot(workspaceRoot, slot.token);
   }
+  persistTimingRecord({ _v: 1, jobId: result.jobId, kind: result.kind, ts: new Date().toISOString(), timing: result.timing });
   const cls = classifyMiniAgentResult(result);
 
   const exitCode = STATUS_EXIT_CODE[cls.status] ?? 5;
@@ -772,7 +776,8 @@ async function runRescue(rawArgs) {
     await updateJobMeta(workspaceRoot, jobId, { status: "running", startedAt: Date.now(), pid: process.pid });
 
     const onProgressLine = options.json ? undefined : (line) => process.stdout.write(stripAnsiSgr(line) + "\n");
-    const result = await callMiniAgent({ prompt, cwd: meta.workdir, timeout, onProgressLine });
+    const result = await callMiniAgent({ prompt, cwd: meta.workdir, timeout, onProgressLine, jobId, kind: "rescue" });
+    persistTimingRecord({ _v: 1, jobId: result.jobId, kind: result.kind, ts: new Date().toISOString(), timing: result.timing });
     const cls = classifyMiniAgentResult(result);
 
     await updateJobMeta(workspaceRoot, jobId, {
@@ -850,7 +855,10 @@ async function runWorker(rawArgs) {
         timeout: meta.timeout || 300_000,
         extraArgs: meta.extraArgs || [],
         onProgressLine,
+        jobId,
+        kind: "rescue",
       });
+      persistTimingRecord({ _v: 1, jobId: result.jobId, kind: result.kind, ts: new Date().toISOString(), timing: result.timing });
       cls = classifyMiniAgentResult(result);
     } catch (err) {
       try {

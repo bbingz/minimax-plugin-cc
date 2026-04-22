@@ -4,9 +4,32 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import { binaryAvailable } from "./process.mjs";
-import { withLockAsync } from "./state.mjs";
+import { withLockAsync, appendTimingHistory } from "./state.mjs";
 import { TimingAccumulator } from "./timing.mjs";
+
+/**
+ * Telemetry-only job id (NOT registered in job-control). Used by ask/review/
+ * adversarial so their timing records join by id without needing full
+ * createJob() lifecycle. Spec §5 "Synthetic jobId rule".
+ */
+export function syntheticTelemetryJobId() {
+  return "mj-" + randomUUID();
+}
+
+/**
+ * Fire-and-forget telemetry write. Wraps appendTimingHistory per spec §6 v2.1
+ * error modes (may throw on EACCES/EXDEV pre-lock); swallows all errors with
+ * stderr diagnostic so telemetry never blocks primary result.
+ */
+export function persistTimingRecord(record) {
+  try {
+    appendTimingHistory(record);
+  } catch (e) {
+    try { process.stderr.write(`[timing] persist failed: ${e.message}\n`); } catch { /* ignore */ }
+  }
+}
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const AUTH_CHECK_TIMEOUT_MS = 30_000;
@@ -1422,6 +1445,8 @@ async function _callReviewLike({
   onProgressLine,
   retryWarning = "Warning: minimax review response failed parse/validation; retrying once with error hint...\n",
   errorPrefix = "schema-load-failed",
+  jobId,  // v0.1.3 telemetry tag
+  kind,   // v0.1.3 telemetry tag (review | adversarial-red | adversarial-blue)
 }) {
   let firstPrompt;
   try {
@@ -1430,7 +1455,8 @@ async function _callReviewLike({
     return reviewError({ error: `${errorPrefix}: ${e.message}`, truncated, retry_used: false });
   }
 
-  const firstCall = await callMiniAgent({ prompt: firstPrompt, cwd, timeout, bin, logDir, onProgressLine });
+  const firstCall = await callMiniAgent({ prompt: firstPrompt, cwd, timeout, bin, logDir, onProgressLine, jobId, kind });
+  if (jobId) persistTimingRecord({ _v: 1, jobId: firstCall.jobId, kind: firstCall.kind, ts: new Date().toISOString(), timing: firstCall.timing });
   const firstCls = classifyMiniAgentResult(firstCall);
   if (firstCls.status !== "success" && firstCls.status !== "success-but-truncated") {
     return reviewError({
@@ -1488,7 +1514,8 @@ async function _callReviewLike({
     });
   }
 
-  const retryCall = await callMiniAgent({ prompt: retryPrompt, cwd, timeout, bin, logDir, onProgressLine });
+  const retryCall = await callMiniAgent({ prompt: retryPrompt, cwd, timeout, bin, logDir, onProgressLine, jobId, kind });
+  if (jobId) persistTimingRecord({ _v: 1, jobId: retryCall.jobId, kind: retryCall.kind, ts: new Date().toISOString(), timing: retryCall.timing });
   const retryCls = classifyMiniAgentResult(retryCall);
   const retryTruncated = firstTruncated || retryCls.status === "success-but-truncated";
 
@@ -1545,6 +1572,7 @@ export async function callMiniAgentReview({
 }) {
   const buildPrompt = ({ retryHint, previousRaw } = {}) =>
     buildReviewPrompt({ schemaPath, focus, context, retryHint, previousRaw });
+  const jobId = syntheticTelemetryJobId();
   return _callReviewLike({
     buildPrompt,
     schemaPath,
@@ -1555,6 +1583,8 @@ export async function callMiniAgentReview({
     truncated,
     onProgressLine,
     retryWarning: "Warning: minimax review response failed parse/validation; retrying once with error hint...\n",
+    jobId,
+    kind: "review",
   });
 }
 
@@ -1596,6 +1626,10 @@ export async function callMiniAgentAdversarial({
     if (typeof onProgressLine === "function") onProgressLine(`[${stance}] ${line}`);
   };
 
+  // v0.1.3: red and blue get DISTINCT synthetic jobIds + distinct kinds (D7)
+  const redJobId = syntheticTelemetryJobId();
+  const blueJobId = syntheticTelemetryJobId();
+
   const redResult = await _callReviewLike({
     buildPrompt: ({ retryHint, previousRaw } = {}) =>
       buildAdversarialPrompt({ stance: "red", schemaPath, focus, context, retryHint, previousRaw }),
@@ -1608,6 +1642,8 @@ export async function callMiniAgentAdversarial({
     onProgressLine: onProgressLine ? wrapStance("red") : undefined,
     retryWarning: "Warning: minimax adversarial-review (red) response failed parse/validation; retrying once with error hint...\n",
     errorPrefix: "prompt-build-failed",
+    jobId: redJobId,
+    kind: "adversarial-red",
   });
 
   if (!redResult.ok) {
@@ -1631,6 +1667,8 @@ export async function callMiniAgentAdversarial({
     onProgressLine: onProgressLine ? wrapStance("blue") : undefined,
     retryWarning: "Warning: minimax adversarial-review (blue) response failed parse/validation; retrying once with error hint...\n",
     errorPrefix: "prompt-build-failed",
+    jobId: blueJobId,
+    kind: "adversarial-blue",
   });
 
   if (!blueResult.ok) {
