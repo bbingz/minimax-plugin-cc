@@ -117,3 +117,69 @@ export class TimingAccumulator {
 
 /** @returns {void} reserved stub for future upstream stream-event dispatch (D2) */
 export function dispatchTimingEvent(event, timing) { return; }
+
+// ─── Aggregate helpers ────────────────────────────────────────────────────────
+
+export function percentile(values, p) {
+  const filtered = values.filter((v) => v != null && typeof v === "number" && Number.isFinite(v));
+  if (filtered.length === 0) return null;
+  const sorted = filtered.slice().sort((a, b) => a - b);
+  const rank = Math.ceil(p * sorted.length);
+  const idx = Math.max(0, Math.min(sorted.length - 1, rank - 1));
+  return sorted[idx];
+}
+
+const PERCENTILE_CUTOFFS = { p50: 1, p95: 20, p99: 100 };
+const METRICS = ["firstEventMs", "ttftMs", "streamMs", "toolMs", "retryMs", "totalMs"];
+
+export function computeAggregateStats(records) {
+  const n = records.length;
+  const percentiles = {};
+  for (const [p, cutoff] of Object.entries(PERCENTILE_CUTOFFS)) {
+    if (n < cutoff) { percentiles[p] = null; continue; }
+    const row = {};
+    for (const m of METRICS) {
+      row[m] = percentile(records.map((r) => r.timing?.[m]), Number(p.slice(1)) / 100);
+    }
+    percentiles[p] = row;
+  }
+
+  let slowest = null;
+  for (const r of records) {
+    const total = r.timing?.totalMs || 0;
+    if (!slowest || total > slowest.totalMs) {
+      slowest = {
+        jobId: r.jobId,
+        totalMs: total,
+        fallback: Array.isArray(r.timing?.usage) && r.timing.usage.length > 1,
+      };
+    }
+  }
+
+  let fallbackCount = 0;
+  let anyUsagePopulated = false;
+  for (const r of records) {
+    const usage = r.timing?.usage;
+    if (Array.isArray(usage) && usage.length >= 1) anyUsagePopulated = true;
+    if (Array.isArray(usage) && usage.length > 1) fallbackCount++;
+  }
+  const fallbackRate = n > 0 ? Math.round((fallbackCount / n) * 1000) / 1000 : 0;
+
+  return {
+    n,
+    percentiles,
+    slowest,
+    fallbackCount,
+    fallbackRate,
+    usageAvailable: anyUsagePopulated,
+  };
+}
+
+export function filterHistory(records, { kind, last, since } = {}) {
+  let out = records.slice();
+  if (kind && kind !== "all") out = out.filter((r) => r.kind === kind);
+  if (since) out = out.filter((r) => r.ts && r.ts >= since);
+  out.sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
+  if (last) out = out.slice(0, last);
+  return out;
+}

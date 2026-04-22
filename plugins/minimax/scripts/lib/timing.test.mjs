@@ -1,6 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TimingAccumulator, dispatchTimingEvent } from "./timing.mjs";
+import {
+  TimingAccumulator, dispatchTimingEvent,
+  percentile, computeAggregateStats, filterHistory,
+} from "./timing.mjs";
+
+const mkRecord = ({ kind = "ask", ts = "2026-04-22T10:00:00.000Z", jobId = "mj-X", timing = {} }) => ({
+  _v: 1, jobId, kind, ts,
+  timing: {
+    firstEventMs: 100, ttftMs: null, streamMs: 1000, toolMs: null, retryMs: null,
+    tailMs: 50, totalMs: 1150, usage: [], tokensPerSec: null,
+    ...timing,
+  },
+});
 
 test("TimingAccumulator: happy path — spawn/firstEvent/multiple stdout/close yields complete record", () => {
   const t0 = 1_000_000;
@@ -120,4 +132,81 @@ test("TimingAccumulator: setRequestedModel first-wins", () => {
   t.setRequestedModel("B");
   t.onClose(1, { exitCode: 0 });
   assert.equal(t.build().requestedModel, "A");
+});
+
+test("percentile: empty or all-null returns null", () => {
+  assert.equal(percentile([], 0.5), null);
+  assert.equal(percentile([null, null], 0.5), null);
+});
+
+test("percentile: basic ranks", () => {
+  assert.equal(percentile([1, 2, 3, 4, 5], 0.5), 3);
+  assert.equal(percentile([10, 20, 30, 40, 50], 0.95), 50);
+  assert.equal(percentile([1, 2, 3], 0.99), 3);
+});
+
+test("computeAggregateStats: n=19 → p95 null, n=20 → p95 populated (boundary)", () => {
+  const mk = (n) => Array.from({ length: n }, (_, i) => mkRecord({ timing: { totalMs: 1000 + i } }));
+  assert.equal(computeAggregateStats(mk(19)).percentiles.p95, null);
+  assert.ok(computeAggregateStats(mk(20)).percentiles.p95);
+});
+
+test("computeAggregateStats: n=99 → p99 null, n=100 → p99 populated (boundary)", () => {
+  const mk = (n) => Array.from({ length: n }, (_, i) => mkRecord({ timing: { totalMs: 1000 + i } }));
+  assert.equal(computeAggregateStats(mk(99)).percentiles.p99, null);
+  assert.ok(computeAggregateStats(mk(100)).percentiles.p99);
+});
+
+test("computeAggregateStats: usage=[] everywhere → fallbackRate 0, usageAvailable false", () => {
+  const records = [mkRecord({ timing: { usage: [] } }), mkRecord({ timing: { usage: [] } })];
+  const stats = computeAggregateStats(records);
+  assert.equal(stats.fallbackRate, 0);
+  assert.equal(stats.fallbackCount, 0);
+  assert.equal(stats.usageAvailable, false);
+});
+
+test("computeAggregateStats: fallback detected when any usage.length > 1", () => {
+  const records = [
+    mkRecord({ timing: { usage: [{ model: "A", input: 1, output: 1, thoughts: 0 }] } }),
+    mkRecord({ timing: { usage: [
+      { model: "A", input: 1, output: 1, thoughts: 0 },
+      { model: "B-fallback", input: 0, output: 1, thoughts: 0 },
+    ] } }),
+  ];
+  const stats = computeAggregateStats(records);
+  assert.equal(stats.fallbackCount, 1);
+  assert.equal(stats.fallbackRate, 0.5);
+  assert.equal(stats.usageAvailable, true);
+});
+
+test("filterHistory: kind filter", () => {
+  const recs = [mkRecord({ kind: "ask" }), mkRecord({ kind: "review" }), mkRecord({ kind: "ask" })];
+  const out = filterHistory(recs, { kind: "ask" });
+  assert.equal(out.length, 2);
+  assert.ok(out.every((r) => r.kind === "ask"));
+});
+
+test("filterHistory: since filter — future timestamp returns empty", () => {
+  const recs = [mkRecord({ ts: "2026-04-22T10:00:00.000Z" })];
+  const future = new Date(Date.now() + 86_400_000).toISOString();
+  const out = filterHistory(recs, { since: future });
+  assert.equal(out.length, 0);
+});
+
+test("filterHistory: last N newest-first ordering", () => {
+  const recs = [
+    mkRecord({ jobId: "mj-oldest", ts: "2026-04-20T10:00:00.000Z" }),
+    mkRecord({ jobId: "mj-middle", ts: "2026-04-21T10:00:00.000Z" }),
+    mkRecord({ jobId: "mj-newest", ts: "2026-04-22T10:00:00.000Z" }),
+  ];
+  const out = filterHistory(recs, { last: 2 });
+  assert.equal(out.length, 2);
+  assert.equal(out[0].jobId, "mj-newest");
+  assert.equal(out[1].jobId, "mj-middle");
+});
+
+test("filterHistory: kind 'all' passes through all records", () => {
+  const recs = [mkRecord({ kind: "ask" }), mkRecord({ kind: "review" })];
+  const out = filterHistory(recs, { kind: "all" });
+  assert.equal(out.length, 2);
 });
