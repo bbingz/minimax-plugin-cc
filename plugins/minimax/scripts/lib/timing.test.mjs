@@ -252,6 +252,33 @@ test("renderHistoryTable: short jobId (≤13 chars) is preserved unchanged", () 
   assert.ok(!dataLine.includes("…"), "no truncation marker for short ids");
 });
 
+test("renderHistoryTable: adversarial-red/blue abbreviated to adv-red/adv-blue (kind col stays 8-wide)", () => {
+  const rows = [
+    mkRecord({ jobId: "mj-r1", kind: "adversarial-red", timing: { totalMs: 62000 } }),
+    mkRecord({ jobId: "mj-b1", kind: "adversarial-blue", timing: { totalMs: 24500 } }),
+  ];
+  const out = renderHistoryTable(rows);
+  const [redLine, blueLine] = out.split("\n").slice(1, 3);
+  assert.ok(redLine.includes("adv-red"), `expected 'adv-red'; got: ${redLine}`);
+  assert.ok(!redLine.includes("adversarial-red"), "full 'adversarial-red' should NOT appear in history column");
+  assert.ok(blueLine.includes("adv-blue"), `expected 'adv-blue'; got: ${blueLine}`);
+  assert.ok(!blueLine.includes("adversarial-blue"), "full 'adversarial-blue' should NOT appear");
+  // verify total column separation: kind 'adv-blue' (8) padEnd(8) + space before total
+  assert.match(blueLine, /adv-blue\s+\d/, "adv-blue kind column must have whitespace before total");
+});
+
+test("renderHistoryTable: ask/review/rescue kinds are NOT abbreviated", () => {
+  const rows = [
+    mkRecord({ jobId: "mj-a", kind: "ask", timing: { totalMs: 1000 } }),
+    mkRecord({ jobId: "mj-v", kind: "review", timing: { totalMs: 5000 } }),
+    mkRecord({ jobId: "mj-s", kind: "rescue", timing: { totalMs: 7100 } }),
+  ];
+  const out = renderHistoryTable(rows);
+  assert.match(out, /\bask\b/);
+  assert.match(out, /\breview\b/);
+  assert.match(out, /\brescue\b/);
+});
+
 test("renderAggregateTable: fallback rate renders '—' when usageAvailable false", () => {
   const stats = {
     n: 5,

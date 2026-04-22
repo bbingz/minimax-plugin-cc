@@ -200,18 +200,26 @@ function truncateId(id, max = 13) {
   return id.length <= max ? id : id.slice(0, max) + "…";
 }
 
+// Short labels for the 8-wide kind column in renderHistoryTable.
+// Only `adversarial-red` (15) and `adversarial-blue` (16) would otherwise
+// overflow; other kinds (`ask`/`review`/`rescue`) already fit.
+const KIND_DISPLAY = { "adversarial-red": "adv-red", "adversarial-blue": "adv-blue" };
+function displayKind(kind) {
+  return KIND_DISPLAY[kind] || kind || "?";
+}
+
 export function renderHistoryTable(rows) {
   const lines = [];
   // `cliBoot` label replaces Gemini's `cold` (spec §7) — firstEventMs measures
   // Mini-Agent CLI boot (Python+click+skill-metadata), NOT model TTFT.
-  lines.push("id              kind    total      cliBoot  ttft    gen     tool    retry   tok/s   fb   completedAt");
+  lines.push("id              kind     total      cliBoot  ttft    gen     tool    retry   tok/s   fb   completedAt");
   for (const r of rows) {
     const t = r.timing || {};
     const usage = Array.isArray(t.usage) ? t.usage : [];
     const fb = usage.length === 0 ? "—" : usage.length > 1 ? "y" : "n";
     lines.push([
       truncateId(r.jobId).padEnd(16),
-      (r.kind || "?").padEnd(8),
+      displayKind(r.kind).padEnd(9),
       formatMs(t.totalMs).padEnd(10),
       formatMs(t.firstEventMs).padEnd(9),
       formatMs(t.ttftMs).padEnd(8),
