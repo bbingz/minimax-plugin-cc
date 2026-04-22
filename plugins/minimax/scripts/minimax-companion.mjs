@@ -33,6 +33,15 @@ import {
   cancelJob,
   jobDir,
 } from "./lib/job-control.mjs";
+import { resolveTimingHistoryFile } from "./lib/state.mjs";
+import {
+  filterHistory,
+  computeAggregateStats,
+  renderHistoryTable,
+  renderAggregateTable,
+} from "./lib/timing.mjs";
+
+const VALID_TIMING_KINDS = new Set(["ask", "review", "adversarial-red", "adversarial-blue", "rescue"]);
 
 const USAGE = `Usage: minimax-companion <subcommand> [options]
 
@@ -1063,6 +1072,58 @@ async function runTaskResumeCandidate(rawArgs) {
   process.exit(0);
 }
 
+async function runTiming(rawArgs) {
+  const { options } = parseArgs(rawArgs, {
+    booleanOptions: ["aggregate", "json"],
+    valueOptions: ["kind", "last", "since"],
+  });
+  const kind = options.kind || "all";
+  const last = options.last != null ? Number(options.last) : 20;
+  const since = options.since || null;
+  const aggregate = options.aggregate === true;
+  const json = options.json === true;
+
+  if (since && Number.isNaN(Date.parse(since))) {
+    process.stderr.write(`/minimax:timing: --since '${since}' is not a valid ISO timestamp\n`);
+    process.exit(3);
+  }
+
+  if (aggregate) {
+    if (!kind || kind === "all" || !VALID_TIMING_KINDS.has(kind)) {
+      process.stderr.write(
+        "/minimax:timing: --aggregate requires --kind <ask|review|adversarial-red|adversarial-blue|rescue>\n" +
+        "  (adversarial emits two records per invocation; mixing kinds produces meaningless aggregates per D7).\n"
+      );
+      process.exit(2);
+    }
+  }
+
+  const file = resolveTimingHistoryFile();
+  if (!fs.existsSync(file)) {
+    process.stderr.write(`[timing] no records yet. File: ${file}\n`);
+    process.exit(0);
+  }
+  const raw = fs.readFileSync(file, "utf8");
+  const records = [];
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    try { records.push(JSON.parse(line)); } catch { /* skip malformed */ }
+  }
+
+  const filtered = filterHistory(records, { kind, last, since });
+
+  if (json) {
+    for (const r of filtered) process.stdout.write(JSON.stringify(r) + "\n");
+    return;
+  }
+  if (aggregate) {
+    const stats = computeAggregateStats(filtered);
+    process.stdout.write(renderAggregateTable(stats, { kind }) + "\n");
+    return;
+  }
+  process.stdout.write(renderHistoryTable(filtered) + "\n");
+}
+
 async function main() {
   const argv = process.argv.slice(2);
 
@@ -1092,6 +1153,8 @@ async function main() {
       return await runCancel(rest);
     case "task-resume-candidate":
       return await runTaskResumeCandidate(rest);
+    case "timing":
+      return await runTiming(rest);
     case "_worker":
       return await runWorker(rest);
     case undefined:
