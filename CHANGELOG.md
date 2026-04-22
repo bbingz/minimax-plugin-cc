@@ -1,4 +1,24 @@
 
+## 2026-04-22 [Claude opus controller] — v0.1.3 — timing + SessionStart cleanup + upstream absorbed
+
+- **status**: done (code + tests + docs; T14 real-Mini-Agent smoke pending user-side verification before tag)
+- **scope**: per spec `docs/superpowers/specs/2026-04-22-v0.1.3-timing-cleanup-upstream.md` v2.1:
+  - `lib/timing.mjs`: `TimingAccumulator` class (field names mirror gemini-plugin-cc, `invariantKind: "3term"` discriminator) + `percentile` / `computeAggregateStats` / `filterHistory` / render helpers (history table / aggregate / one-liner)
+  - `lib/state.mjs::appendTimingHistory` (O_EXCL lock, 10 MB cap + half-trim retention, crash-recovery leading `\n`, separate `TIMING_FALLBACK_DIR` so telemetry lands at Gemini-compat path, not jobs' tmpdir)
+  - `callMiniAgent` signature gains optional `{jobId, kind}`; 5 call sites wired to persist post-return (runAsk / runReview → _callReviewLike / callMiniAgentAdversarial red+blue / runRescue foreground + _worker)
+  - `/minimax:timing` command (history / `--aggregate --kind <single>` / `--json`) + D7 composition rule (exit 2 when `--aggregate` lacks valid `--kind`) + `--since` ISO validation (exit 3)
+  - `session-lifecycle-hook.mjs`: SessionEnd per-session terminal cleanup + SessionStart 4-branch mtime sweep (terminal / non-terminal+dead / missing-meta / corrupt-meta+fresh-skip), `MINIMAX_STALE_JOB_THRESHOLD_MS` env override (D4 flipped)
+  - `skills/minimax-result-handling/references/timing-render.md` (exit codes + aggregate `—` semantics)
+  - Upstream Mini-Agent issue: **not filed** (user decision 2026-04-22; limitations absorbed internally, documented in `PROGRESS.md §Upstream limitations`)
+- **summary**:
+  - Three fields (`firstEventMs` / `streamMs` / `retryMs`) share Gemini names but carry different semantic — `firstEventMs` measures Mini-Agent CLI boot (probe P0.1), `streamMs` is stdout-line bracket and silently absorbs Mini-Agent's 1+2+4s internal retries (probe P0.2/P0.5), `retryMs` null by design. Documented in spec §4 compat callout.
+  - `invariantKind: "3term"` lets cross-plugin tools branch on `firstEventMs + streamMs + tailMs === totalMs` vs Gemini's 6-term sum.
+  - `usage: []` (not null) — matches Gemini's `this._usage || []` so downstream `.length` / `.map()` stay safe. Empty until upstream adds `served_model` (which we chose not to request).
+  - `fallback rate` renders `—` (not `0.0%`) when no record has populated `usage` — avoids misleading "no fallback detected" vs true "cannot detect".
+  - 6-way spec review (11 Critical + 17 High + 11 Medium) + 3-way sanity (5 new H + 2 M) + 3-way plan review (5 Critical + 7 High) all folded before execution.
+- **tests**: 133 pass / 0 fail (prior 86 + timing 22 + state 6 + hook 13 + adversarial D7 integration 1 + callMiniAgent regression 1 + other extras = +47). Full test paths: `plugins/minimax/scripts/lib/*.test.mjs` + `plugins/minimax/scripts/session-lifecycle-hook.test.mjs`.
+- **next**: T14 real-Mini-Agent smoke (user-run 11 assertions) → tag `v0.1.3` → push → `gh release create` → Gemini re-alignment signal in PROGRESS.md.
+
 ## 2026-04-22 04:30 [Claude opus controller] — v0.1.2 patch — review fixes + release prep
 
 - **status**: done

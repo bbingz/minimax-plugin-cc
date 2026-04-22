@@ -1,14 +1,14 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "minimax-plugin",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "MiniMax Mini-Agent plugin for Claude Code",
   "owner": { "name": "bing" },
   "plugins": [
     {
       "name": "minimax",
       "description": "Use MiniMax (via Mini-Agent) from Claude Code to review code, delegate multi-step agentic tasks, or leverage 15 built-in Claude Skills + MCP tools.",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "author": { "name": "bing" },
       "source": "./plugins/minimax",
       "category": "development"

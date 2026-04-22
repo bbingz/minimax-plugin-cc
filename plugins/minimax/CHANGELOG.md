@@ -1,5 +1,14 @@
 # minimax plugin CHANGELOG
 
+## 2026-04-22 — v0.1.3 (timing + SessionStart cleanup)
+
+- **Timing telemetry** (`lib/timing.mjs` + `timings.ndjson`): per-spawn `TimingAccumulator` with Gemini-matching field names. Three fields (`firstEventMs` / `streamMs` / `retryMs`) share names with different semantic — documented via spec §4 compat callout + `invariantKind: "3term"` discriminator.
+- **`/minimax:timing` command**: history table (default) / `--aggregate --kind <single>` (p50/p95/p99 percentiles) / `--json`. `--aggregate` rejects missing or `all` kind (exit 2). `--since` validates ISO (exit 3).
+- **Cleanup hook**: SessionEnd per-session terminal cleanup (sessionId filter). SessionStart mtime-based sweep with 4 decision branches: terminal / non-terminal+dead-pid / missing-meta / corrupt-meta-with-fresh-skip. `MINIMAX_STALE_JOB_THRESHOLD_MS` env override, 3-day default.
+- **ndjson retention**: 10 MB cap, half-trim on overflow, O_EXCL lock with 10s acquire + 30s stale-reclaim, crash-recovery prepends `\n` on next append.
+- **Upstream Mini-Agent issue**: deliberately NOT filed; limitations (`served_model` / token `usage` / per-line timestamps absent) absorbed internally. `TimingAccumulator` reserved no-op methods stay as forward-compat scaffolding for future upstream changes.
+- **Tests**: 133 pass / 0 fail.
+
 ## 2026-04-22 — v0.1.2 (review hardening + release)
 
 - **Critical**: switch `buildReviewPrompt` + `buildAdversarialPrompt` placeholder substitution to callback-form `.replace(pat, () => value)` so JS does not interpret `$&` / `$$` / `$1-$9` inside user-derived content.
