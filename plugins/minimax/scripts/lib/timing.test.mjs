@@ -268,3 +268,30 @@ test("renderStatusSummaryLine: populated fields only", () => {
   assert.ok(out.includes("gen 12.8s"));
   assert.ok(!out.includes("ttft"));
 });
+
+test("D7 integration: two distinct records under different kinds with different jobIds (via state.mjs ndjson)", async () => {
+  const fs_ = await import("node:fs");
+  const os_ = await import("node:os");
+  const path_ = await import("node:path");
+  const { appendTimingHistory } = await import("./state.mjs");
+  const tmp = fs_.mkdtempSync(path_.join(os_.tmpdir(), "d7-"));
+  const prev = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = tmp;
+  try {
+    const red = { _v: 1, jobId: "mj-red", kind: "adversarial-red", ts: "t1", timing: { totalMs: 100 } };
+    const blue = { _v: 1, jobId: "mj-blue", kind: "adversarial-blue", ts: "t2", timing: { totalMs: 200 } };
+    appendTimingHistory(red);
+    appendTimingHistory(blue);
+    const file = path_.join(tmp, "timings.ndjson");
+    const lines = fs_.readFileSync(file, "utf8").split("\n").filter(Boolean);
+    assert.equal(lines.length, 2);
+    const kinds = lines.map((l) => JSON.parse(l).kind).sort();
+    assert.deepEqual(kinds, ["adversarial-blue", "adversarial-red"]);
+    const jobIds = lines.map((l) => JSON.parse(l).jobId);
+    assert.notEqual(jobIds[0], jobIds[1], "red and blue jobIds must differ");
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = prev;
+    fs_.rmSync(tmp, { recursive: true, force: true });
+  }
+});
